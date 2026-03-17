@@ -1,1 +1,1 @@
-web: php -S 0.0.0.0:$PORT
+web: node index.js
