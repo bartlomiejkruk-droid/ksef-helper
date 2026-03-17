@@ -1,7 +1,7 @@
-const http = require('http');
-const crypto = require('crypto');
+const http = require("http");
+const crypto = require("crypto");
 
-const publicKey = `-----BEGIN PUBLIC KEY-----
+const PUBLIC_KEY = `-----BEGIN PUBLIC KEY-----
 MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArYQy0nF6BqF9t7VDaRao
 IhiHBpjz2uVH54camzatoNgtrENcGukdxbYlR5c+3F4iAfDdc0AGJi/7luWGINuD
 7++UZ5EONosFVJeFt3PcTJS3BM4tiTqcKoy0eZZ+j9RnBbTK1ZBOqVakiobP6KyL
@@ -11,47 +11,37 @@ ixkmKuuNHYsYvwdivgLPgAvFp8ZUBKbjsgg7sWXBJgp7wa9u0edPFsKnz03Wx/ju
 RwIDAQAB
 -----END PUBLIC KEY-----`;
 
-const server = http.createServer((req, res) => {
-  if (req.method !== 'POST') {
-    res.writeHead(405, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ error: 'Method not allowed' }));
-  }
+http.createServer((req, res) => {
 
-  let body = '';
-  req.on('data', chunk => {
-    body += chunk.toString();
-  });
+if(req.method !== "POST"){
+res.writeHead(405);
+return res.end();
+}
 
-  req.on('end', () => {
-    try {
-      const data = JSON.parse(body);
+let body = "";
 
-      if (!data.token || !data.timestamp) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ error: 'Brak token albo timestamp' }));
-      }
+req.on("data", chunk => body += chunk);
 
-      const plaintext = `${data.token}|${data.timestamp}`;
+req.on("end", () => {
 
-      const encrypted = crypto.publicEncrypt(
-        {
-          key: publicKey,
-          padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
-          oaepHash: 'sha256'
-        },
-        Buffer.from(plaintext, 'utf8')
-      );
+const data = JSON.parse(body);
 
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({
-        encryptedToken: encrypted.toString('base64')
-      }));
-    } catch (e) {
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: e.message }));
-    }
-  });
+const plaintext = `${data.token}|${data.timestamp}`;
+
+const encrypted = crypto.publicEncrypt(
+{
+key: PUBLIC_KEY,
+padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+oaepHash: "sha256"
+},
+Buffer.from(plaintext)
+);
+
+res.writeHead(200, {"Content-Type":"application/json"});
+res.end(JSON.stringify({
+encryptedToken: encrypted.toString("base64")
+}));
+
 });
 
-const port = process.env.PORT || 3000;
-server.listen(port, '0.0.0.0');
+}).listen(process.env.PORT || 3000);
