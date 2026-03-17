@@ -1,47 +1,78 @@
 const http = require("http");
+const https = require("https");
 const crypto = require("crypto");
 
-const PUBLIC_KEY = `-----BEGIN PUBLIC KEY-----
-MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArYQy0nF6BqF9t7VDaRao
-IhiHBpjz2uVH54camzatoNgtrENcGukdxbYlR5c+3F4iAfDdc0AGJi/7luWGINuD
-7++UZ5EONosFVJeFt3PcTJS3BM4tiTqcKoy0eZZ+j9RnBbTK1ZBOqVakiobP6KyL
-Y6z3Y0JVpaz6RtWLpmjHtkobaN6D+PfYZ7RUTpujISiFDUFxIr05oig3NbS1RyYP
-F7kKIhxX3sI5Yucs5cjox96D65gis6pZeRAEIJ5zsxFrqxbPjzvY4xXHzkwmo7aX
-ixkmKuuNHYsYvwdivgLPgAvFp8ZUBKbjsgg7sWXBJgp7wa9u0edPFsKnz03Wx/ju
-RwIDAQAB
------END PUBLIC KEY-----`;
-
-http.createServer((req, res) => {
-
-if(req.method !== "POST"){
-res.writeHead(405);
-return res.end();
+function derBase64ToPemCertificate(derBase64) {
+  const lines = derBase64.match(/.{1,64}/g) || [];
+  return [
+    "-----BEGIN CERTIFICATE-----",
+    ...lines,
+    "-----END CERTIFICATE-----"
+  ].join("\n");
 }
 
-let body = "";
+function fetchCurrentCertificate() {
+  return new Promise((resolve, reject) => {
+    https.get("https://api-test.ksef.mf.gov.pl/v2/security/public-key-certificates", (res) => {
+      let data = "";
+      res.on("data", chunk => data += chunk);
+      res.on("end", () => {
+        try {
+          const arr = JSON.parse(data);
+          const cert = arr.find(x => Array.isArray(x.usage) && x.usage.includes("KsefTokenEncryption"));
+          if (!cert) {
+            return reject(new Error("Brak certyfikatu KsefTokenEncryption"));
+          }
+          resolve(derBase64ToPemCertificate(cert.certificate));
+        } catch (e) {
+          reject(e);
+        }
+      });
+    }).on("error", reject);
+  });
+}
 
-req.on("data", chunk => body += chunk);
+const server = http.createServer(async (req, res) => {
+  if (req.method !== "POST") {
+    res.writeHead(405, { "Content-Type": "application/json" });
+    return res.end(JSON.stringify({ error: "Method not allowed" }));
+  }
 
-req.on("end", () => {
+  let body = "";
+  req.on("data", chunk => body += chunk.toString());
 
-const data = JSON.parse(body);
+  req.on("end", async () => {
+    try {
+      const data = JSON.parse(body);
 
-const plaintext = `${data.token}|${data.timestamp}`;
+      if (!data.token || !data.timestamp) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        return res.end(JSON.stringify({ error: "Brak token albo timestamp" }));
+      }
 
-const encrypted = crypto.publicEncrypt(
-{
-key: PUBLIC_KEY,
-padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
-oaepHash: "sha256"
-},
-Buffer.from(plaintext)
-);
+      const pemCert = await fetchCurrentCertificate();
 
-res.writeHead(200, {"Content-Type":"application/json"});
-res.end(JSON.stringify({
-encryptedToken: encrypted.toString("base64")
-}));
+      const plaintext = `${data.token}|${data.timestamp}`;
 
+      const encrypted = crypto.publicEncrypt(
+        {
+          key: pemCert,
+          padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+          oaepHash: "sha256",
+        },
+        Buffer.from(plaintext, "utf8")
+      );
+
+      res.writeHead(200, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({
+        encryptedToken: encrypted.toString("base64")
+      }));
+    } catch (e) {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ error: e.message }));
+    }
+  });
 });
 
-}).listen(process.env.PORT || 3000);
+const port = process.env.PORT || 3000;
+server.listen(port, "0.0.0.0");
