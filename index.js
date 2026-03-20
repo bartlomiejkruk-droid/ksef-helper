@@ -1,58 +1,36 @@
-const http = require("http");
-const crypto = require("crypto");
+import express from "express";
+import crypto from "crypto";
 
-const PUBLIC_KEY = `-----BEGIN PUBLIC KEY-----
-MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArYQy0nF6BqF9t7VDaRao
-IhiHBpjz2uVH54camzatoNgtrENcGukdxbYlR5c+3F4iAfDdc0AGJi/7luWGINuD
-7++UZ5EONosFVJeFt3PcTJS3BM4tiTqcKoy0eZZ+j9RnBbTK1ZBOqVakiobP6KyL
-Y6z3Y0JVpaz6RtWLpmjHtkobaN6D+PfYZ7RUTpujISiFDUFxIr05oig3NbS1RyYP
-F7kKIhxX3sI5Yucs5cjox96D65gis6pZeRAEIJ5zsxFrqxbPjzvY4xXHzkwmo7aX
-ixkmKuuNHYsYvwdivgLPgAvFp8ZUBKbjsgg7sWXBJgp7wa9u0edPFsKnz03Wx/ju
-RwIDAQAB
+const app = express();
+app.use(express.json());
+
+// WSTAW TU PRAWDZIWY TESTOWY KLUCZ PUBLICZNY KSeF
+const publicKeyPem = `-----BEGIN PUBLIC KEY-----
+...TESTOWY_KLUCZ_PUBLICZNY_KSEF...
 -----END PUBLIC KEY-----`;
 
-const server = http.createServer((req, res) => {
-  if (req.method !== "POST") {
-    res.writeHead(405, { "Content-Type": "application/json" });
-    return res.end(JSON.stringify({ error: "Method not allowed" }));
-  }
+app.post("/", (req, res) => {
+  try {
+    const plainText = req.body.plainText;
 
-  let body = "";
-  req.on("data", chunk => {
-    body += chunk.toString();
-  });
-
-  req.on("end", () => {
-    try {
-      const data = JSON.parse(body);
-
-      if (!data.token || !data.timestamp) {
-        res.writeHead(400, { "Content-Type": "application/json" });
-        return res.end(JSON.stringify({ error: "Brak token albo timestamp" }));
-      }
-
-      const plaintext = `${data.token}|${data.timestamp}`;
-
-      const encrypted = crypto.publicEncrypt(
-        {
-          key: PUBLIC_KEY,
-          padding: crypto.constants.RSA_PKCS1_PADDING
-        },
-        Buffer.from(plaintext, "utf8")
-      );
-
-      res.writeHead(200, { "Content-Type": "application/json" });
-      return res.end(JSON.stringify({
-        encryptedToken: encrypted.toString("base64")
-      }));
-    } catch (e) {
-      res.writeHead(500, { "Content-Type": "application/json" });
-      return res.end(JSON.stringify({ error: e.message }));
+    if (!plainText || typeof plainText !== "string") {
+      return res.status(400).json({ error: "Brak plainText" });
     }
-  });
+
+    const encryptedBuffer = crypto.publicEncrypt(
+      {
+        key: publicKeyPem,
+        padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+        oaepHash: "sha256",
+      },
+      Buffer.from(plainText, "utf8")
+    );
+
+    const encryptedToken = encryptedBuffer.toString("base64");
+    return res.json({ encryptedToken });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
 });
 
-const port = process.env.PORT || 3000;
-server.listen(port, "0.0.0.0", () => {
-  console.log(`Server running on port ${port}`);
-});
+app.listen(process.env.PORT || 3000);
