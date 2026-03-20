@@ -4,6 +4,13 @@ import crypto from "crypto";
 const app = express();
 app.use(express.json({ limit: "1mb" }));
 
+function toPemCertificate(base64Cert) {
+  const lines = base64Cert.match(/.{1,64}/g)?.join("\n") || base64Cert;
+  return `-----BEGIN CERTIFICATE-----
+${lines}
+-----END CERTIFICATE-----`;
+}
+
 async function getKsefTokenEncryptionPublicKey() {
   const resp = await fetch("https://api-test.ksef.mf.gov.pl/v2/security/public-key-certificates", {
     method: "GET",
@@ -18,11 +25,12 @@ async function getKsefTokenEncryptionPublicKey() {
 
   const data = await resp.json();
 
-  if (!Array.isArray(data?.certificates)) {
-    throw new Error(`Unexpected certificates response: ${JSON.stringify(data)}`);
+  // Endpoint zwraca TABLICĘ, nie { certificates: [...] }
+  if (!Array.isArray(data)) {
+    throw new Error(`Unexpected certificates response type: ${JSON.stringify(data)}`);
   }
 
-  const certObj = data.certificates.find(c =>
+  const certObj = data.find(c =>
     Array.isArray(c.usage) && c.usage.includes("KsefTokenEncryption")
   );
 
@@ -30,17 +38,20 @@ async function getKsefTokenEncryptionPublicKey() {
     throw new Error("No KsefTokenEncryption certificate found");
   }
 
-  const certPem = certObj.certificate;
-  if (!certPem || typeof certPem !== "string") {
-    throw new Error("Certificate PEM missing");
+  if (!certObj.certificate || typeof certObj.certificate !== "string") {
+    throw new Error("Certificate value missing");
   }
 
-  const publicKey = crypto.createPublicKey(certPem).export({
+  const certPem = toPemCertificate(certObj.certificate);
+
+  // Wyciągnięcie public key z certyfikatu X.509
+  const x509 = new crypto.X509Certificate(certPem);
+  const publicKeyPem = x509.publicKey.export({
     type: "spki",
     format: "pem"
-  });
+  }).toString();
 
-  return publicKey.toString();
+  return publicKeyPem;
 }
 
 app.get("/", (req, res) => {
@@ -67,6 +78,7 @@ app.post("/", async (req, res) => {
     );
 
     const encryptedToken = encryptedBuffer.toString("base64");
+
     return res.json({ encryptedToken });
   } catch (e) {
     console.error("POST / error:", e);
