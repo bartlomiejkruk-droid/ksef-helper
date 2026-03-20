@@ -11,12 +11,10 @@ ${lines}
 -----END CERTIFICATE-----`;
 }
 
-async function getKsefTokenEncryptionPublicKey() {
+async function getKsefPublicKeyByUsage(requiredUsage) {
   const resp = await fetch("https://api-test.ksef.mf.gov.pl/v2/security/public-key-certificates", {
     method: "GET",
-    headers: {
-      "Accept": "application/json"
-    }
+    headers: { "Accept": "application/json" }
   });
 
   if (!resp.ok) {
@@ -25,48 +23,40 @@ async function getKsefTokenEncryptionPublicKey() {
 
   const data = await resp.json();
 
-  // Endpoint zwraca TABLICĘ, nie { certificates: [...] }
   if (!Array.isArray(data)) {
     throw new Error(`Unexpected certificates response type: ${JSON.stringify(data)}`);
   }
 
   const certObj = data.find(c =>
-    Array.isArray(c.usage) && c.usage.includes("KsefTokenEncryption")
+    Array.isArray(c.usage) && c.usage.includes(requiredUsage)
   );
 
-  if (!certObj) {
-    throw new Error("No KsefTokenEncryption certificate found");
-  }
-
-  if (!certObj.certificate || typeof certObj.certificate !== "string") {
-    throw new Error("Certificate value missing");
+  if (!certObj?.certificate) {
+    throw new Error(`No certificate found for usage ${requiredUsage}`);
   }
 
   const certPem = toPemCertificate(certObj.certificate);
-
-  // Wyciągnięcie public key z certyfikatu X.509
   const x509 = new crypto.X509Certificate(certPem);
-  const publicKeyPem = x509.publicKey.export({
+
+  return x509.publicKey.export({
     type: "spki",
     format: "pem"
   }).toString();
-
-  return publicKeyPem;
 }
 
 app.get("/", (req, res) => {
   res.json({ ok: true, message: "ksef-helper works" });
 });
 
-app.post("/", async (req, res) => {
+// helper do encryptedToken auth
+app.post("/encrypt-token", async (req, res) => {
   try {
     const plainText = req.body.plainText;
-
     if (!plainText || typeof plainText !== "string") {
       return res.status(400).json({ error: "Brak plainText" });
     }
 
-    const publicKeyPem = await getKsefTokenEncryptionPublicKey();
+    const publicKeyPem = await getKsefPublicKeyByUsage("KsefTokenEncryption");
 
     const encryptedBuffer = crypto.publicEncrypt(
       {
@@ -77,14 +67,40 @@ app.post("/", async (req, res) => {
       Buffer.from(plainText, "utf8")
     );
 
-    const encryptedToken = encryptedBuffer.toString("base64");
-
-    return res.json({ encryptedToken });
-  } catch (e) {
-    console.error("POST / error:", e);
-    return res.status(500).json({
-      error: e.message
+    return res.json({
+      encryptedToken: encryptedBuffer.toString("base64")
     });
+  } catch (e) {
+    console.error("POST /encrypt-token error:", e);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// helper do sesji online
+app.post("/session-encryption", async (req, res) => {
+  try {
+    const publicKeyPem = await getKsefPublicKeyByUsage("SymmetricKeyEncryption");
+
+    const aesKey = crypto.randomBytes(32); // 256 bit
+    const iv = crypto.randomBytes(16);     // 128 bit
+
+    const encryptedSymmetricKey = crypto.publicEncrypt(
+      {
+        key: publicKeyPem,
+        padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+        oaepHash: "sha256",
+      },
+      aesKey
+    );
+
+    return res.json({
+      encryptedSymmetricKey: encryptedSymmetricKey.toString("base64"),
+      initializationVector: iv.toString("base64"),
+      aesKeyBase64: aesKey.toString("base64")
+    });
+  } catch (e) {
+    console.error("POST /session-encryption error:", e);
+    return res.status(500).json({ error: e.message });
   }
 });
 
