@@ -2,7 +2,7 @@ import express from "express";
 import crypto from "crypto";
 
 const app = express();
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: "15mb" }));
 
 function toPemCertificate(base64Cert) {
   const lines = base64Cert.match(/.{1,64}/g)?.join("\n") || base64Cert;
@@ -44,11 +44,15 @@ async function getKsefPublicKeyByUsage(requiredUsage) {
   }).toString();
 }
 
+function sha256Base64(buffer) {
+  return crypto.createHash("sha256").update(buffer).digest("base64");
+}
+
 app.get("/", (req, res) => {
   res.json({ ok: true, message: "ksef-helper works" });
 });
 
-// helper do encryptedToken auth
+// 1) Auth encryptedToken
 app.post("/encrypt-token", async (req, res) => {
   try {
     const plainText = req.body.plainText;
@@ -76,7 +80,7 @@ app.post("/encrypt-token", async (req, res) => {
   }
 });
 
-// helper do sesji online
+// 2) Online session encryption data
 app.post("/session-encryption", async (req, res) => {
   try {
     const publicKeyPem = await getKsefPublicKeyByUsage("SymmetricKeyEncryption");
@@ -100,6 +104,53 @@ app.post("/session-encryption", async (req, res) => {
     });
   } catch (e) {
     console.error("POST /session-encryption error:", e);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// 3) Encrypt XML invoice + hashes/lengths for send invoice
+app.post("/encrypt-document", async (req, res) => {
+  try {
+    const xmlText = req.body.xmlText;
+    const aesKeyBase64 = req.body.aesKeyBase64;
+    const initializationVector = req.body.initializationVector;
+
+    if (!xmlText || typeof xmlText !== "string") {
+      return res.status(400).json({ error: "Brak xmlText" });
+    }
+    if (!aesKeyBase64 || typeof aesKeyBase64 !== "string") {
+      return res.status(400).json({ error: "Brak aesKeyBase64" });
+    }
+    if (!initializationVector || typeof initializationVector !== "string") {
+      return res.status(400).json({ error: "Brak initializationVector" });
+    }
+
+    const invoiceBuffer = Buffer.from(xmlText, "utf8");
+    const aesKey = Buffer.from(aesKeyBase64, "base64");
+    const iv = Buffer.from(initializationVector, "base64");
+
+    if (aesKey.length !== 32) {
+      return res.status(400).json({ error: "AES key must be 32 bytes" });
+    }
+    if (iv.length !== 16) {
+      return res.status(400).json({ error: "IV must be 16 bytes" });
+    }
+
+    const cipher = crypto.createCipheriv("aes-256-cbc", aesKey, iv);
+    const encryptedBuffer = Buffer.concat([
+      cipher.update(invoiceBuffer),
+      cipher.final()
+    ]);
+
+    return res.json({
+      invoiceHash: sha256Base64(invoiceBuffer),
+      invoiceSize: invoiceBuffer.length,
+      encryptedDocumentHash: sha256Base64(encryptedBuffer),
+      encryptedDocumentSize: encryptedBuffer.length,
+      encryptedDocumentContent: encryptedBuffer.toString("base64")
+    });
+  } catch (e) {
+    console.error("POST /encrypt-document error:", e);
     return res.status(500).json({ error: e.message });
   }
 });
