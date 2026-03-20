@@ -5,9 +5,7 @@ const app = express();
 app.use(express.json());
 
 // WSTAW TU PRAWDZIWY TESTOWY KLUCZ PUBLICZNY KSeF
-const publicKeyPem = `-----BEGIN PUBLIC KEY-----
-...TESTOWY_KLUCZ_PUBLICZNY_KSEF...
------END PUBLIC KEY-----`;
+const publicKeyPem = `MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvu7G7yEgmEYBLETymFcp`;
 
 app.post("/", (req, res) => {
   try {
