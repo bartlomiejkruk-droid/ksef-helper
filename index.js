@@ -159,3 +159,90 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Server running on port ${PORT}`);
 });
+app.post("/send-invoice", async (req, res) => {
+  try {
+    const {
+      accessToken,
+      sessionReferenceNumber,
+      xmlText,
+      aesKeyBase64,
+      initializationVector
+    } = req.body;
+
+    if (!accessToken || typeof accessToken !== "string") {
+      return res.status(400).json({ error: "Brak accessToken" });
+    }
+    if (!sessionReferenceNumber || typeof sessionReferenceNumber !== "string") {
+      return res.status(400).json({ error: "Brak sessionReferenceNumber" });
+    }
+    if (!xmlText || typeof xmlText !== "string") {
+      return res.status(400).json({ error: "Brak xmlText" });
+    }
+    if (!aesKeyBase64 || typeof aesKeyBase64 !== "string") {
+      return res.status(400).json({ error: "Brak aesKeyBase64" });
+    }
+    if (!initializationVector || typeof initializationVector !== "string") {
+      return res.status(400).json({ error: "Brak initializationVector" });
+    }
+
+    const invoiceBuffer = Buffer.from(xmlText, "utf8");
+    const aesKey = Buffer.from(aesKeyBase64, "base64");
+    const iv = Buffer.from(initializationVector, "base64");
+
+    if (aesKey.length !== 32) {
+      return res.status(400).json({ error: "AES key must be 32 bytes" });
+    }
+    if (iv.length !== 16) {
+      return res.status(400).json({ error: "IV must be 16 bytes" });
+    }
+
+    const cipher = crypto.createCipheriv("aes-256-cbc", aesKey, iv);
+    const encryptedBuffer = Buffer.concat([
+      cipher.update(invoiceBuffer),
+      cipher.final()
+    ]);
+
+    const invoiceHash = crypto.createHash("sha256").update(invoiceBuffer).digest("base64");
+    const encryptedDocumentHash = crypto.createHash("sha256").update(encryptedBuffer).digest("base64");
+
+    const payload = {
+      fileHash: invoiceHash,
+      invoiceHash: invoiceHash,
+      fileSize: invoiceBuffer.length,
+      invoiceSize: invoiceBuffer.length,
+      encryptedDocumentHash: encryptedDocumentHash,
+      encryptedDocumentSize: encryptedBuffer.length,
+      encryptedDocumentContent: encryptedBuffer.toString("base64")
+    };
+
+    const ksefResp = await fetch(
+      `https://api-test.ksef.mf.gov.pl/v2/sessions/online/${sessionReferenceNumber}/invoices`,
+      {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+          "Accept": "application/json"
+        },
+        body: JSON.stringify(payload)
+      }
+    );
+
+    const text = await ksefResp.text();
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      parsed = { raw: text };
+    }
+
+    return res.status(ksefResp.status).json({
+      requestPayload: payload,
+      ksefStatus: ksefResp.status,
+      ksefResponse: parsed
+    });
+  } catch (e) {
+    console.error("POST /send-invoice error:", e);
+    return res.status(500).json({ error: e.message });
+  }
+});
