@@ -203,15 +203,15 @@ app.post("/send-invoice", async (req, res) => {
     ]);
 
     const fileHash = crypto.createHash("sha256").update(invoiceBuffer).digest("base64");
-    const encryptedDocumentHash = crypto.createHash("sha256").update(encryptedBuffer).digest("base64");
+const encryptedDocumentHash = crypto.createHash("sha256").update(encryptedBuffer).digest("base64");
 
-    const payload = {
-      fileHash: fileHash,
-      fileSize: invoiceBuffer.length,
-      encryptedDocumentHash: encryptedDocumentHash,
-      encryptedDocumentSize: encryptedBuffer.length,
-      encryptedDocumentContent: encryptedBuffer.toString("base64")
-    };
+const payload = {
+  invoiceHash: fileHash,
+  invoiceSize: invoiceBuffer.length,
+  encryptedDocumentHash: encryptedDocumentHash,
+  encryptedDocumentSize: encryptedBuffer.length,
+  encryptedDocumentContent: encryptedBuffer.toString("base64")
+};
 
     const rawBody = JSON.stringify(payload);
 
