@@ -206,7 +206,9 @@ app.post("/send-invoice", async (req, res) => {
 const encryptedDocumentHash = crypto.createHash("sha256").update(encryptedBuffer).digest("base64");
 
 const payload = {
+  fileHash: fileHash,
   invoiceHash: fileHash,
+  fileSize: invoiceBuffer.length,
   invoiceSize: invoiceBuffer.length,
   encryptedDocumentHash: encryptedDocumentHash,
   encryptedDocumentSize: encryptedBuffer.length,
