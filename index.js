@@ -202,18 +202,18 @@ app.post("/send-invoice", async (req, res) => {
       cipher.final()
     ]);
 
-    const invoiceHash = crypto.createHash("sha256").update(invoiceBuffer).digest("base64");
+    const fileHash = crypto.createHash("sha256").update(invoiceBuffer).digest("base64");
     const encryptedDocumentHash = crypto.createHash("sha256").update(encryptedBuffer).digest("base64");
 
     const payload = {
-      fileHash: invoiceHash,
-      invoiceHash: invoiceHash,
+      fileHash: fileHash,
       fileSize: invoiceBuffer.length,
-      invoiceSize: invoiceBuffer.length,
       encryptedDocumentHash: encryptedDocumentHash,
       encryptedDocumentSize: encryptedBuffer.length,
       encryptedDocumentContent: encryptedBuffer.toString("base64")
     };
+
+    const rawBody = JSON.stringify(payload);
 
     const ksefResp = await fetch(
       `https://api-test.ksef.mf.gov.pl/v2/sessions/online/${sessionReferenceNumber}/invoices`,
@@ -224,7 +224,7 @@ app.post("/send-invoice", async (req, res) => {
           "Content-Type": "application/json",
           "Accept": "application/json"
         },
-        body: JSON.stringify(payload)
+        body: rawBody
       }
     );
 
@@ -238,6 +238,7 @@ app.post("/send-invoice", async (req, res) => {
 
     return res.status(ksefResp.status).json({
       requestPayload: payload,
+      rawRequestBody: rawBody,
       ksefStatus: ksefResp.status,
       ksefResponse: parsed
     });
