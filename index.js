@@ -23,10 +23,6 @@ async function getKsefPublicKeyByUsage(requiredUsage) {
 
   const data = await resp.json();
 
-  if (!Array.isArray(data)) {
-    throw new Error(`Unexpected certificates response type: ${JSON.stringify(data)}`);
-  }
-
   const certObj = data.find(c =>
     Array.isArray(c.usage) && c.usage.includes(requiredUsage)
   );
@@ -52,10 +48,11 @@ app.get("/", (req, res) => {
   res.json({ ok: true, message: "ksef-helper works" });
 });
 
-// 1) Auth encryptedToken
+// 1) Encrypt token
 app.post("/encrypt-token", async (req, res) => {
   try {
-    const plainText = req.body.plainText;
+    const { plainText } = req.body;
+
     if (!plainText || typeof plainText !== "string") {
       return res.status(400).json({ error: "Brak plainText" });
     }
@@ -80,13 +77,13 @@ app.post("/encrypt-token", async (req, res) => {
   }
 });
 
-// 2) Online session encryption data
+// 2) Session encryption
 app.post("/session-encryption", async (req, res) => {
   try {
     const publicKeyPem = await getKsefPublicKeyByUsage("SymmetricKeyEncryption");
 
-    const aesKey = crypto.randomBytes(32); // 256 bit
-    const iv = crypto.randomBytes(16);     // 128 bit
+    const aesKey = crypto.randomBytes(32);
+    const iv = crypto.randomBytes(16);
 
     const encryptedSymmetricKey = crypto.publicEncrypt(
       {
@@ -108,39 +105,22 @@ app.post("/session-encryption", async (req, res) => {
   }
 });
 
-// 3) Encrypt XML invoice + hashes/lengths for send invoice
+// 3) Encrypt document (debug / test)
 app.post("/encrypt-document", async (req, res) => {
   try {
-    const xmlText = req.body.xmlText;
-    const aesKeyBase64 = req.body.aesKeyBase64;
-    const initializationVector = req.body.initializationVector;
-
-    if (!xmlText || typeof xmlText !== "string") {
-      return res.status(400).json({ error: "Brak xmlText" });
-    }
-    if (!aesKeyBase64 || typeof aesKeyBase64 !== "string") {
-      return res.status(400).json({ error: "Brak aesKeyBase64" });
-    }
-    if (!initializationVector || typeof initializationVector !== "string") {
-      return res.status(400).json({ error: "Brak initializationVector" });
-    }
+    const { xmlText, aesKeyBase64, initializationVector } = req.body;
 
     const invoiceBuffer = Buffer.from(xmlText, "utf8");
     const aesKey = Buffer.from(aesKeyBase64, "base64");
     const iv = Buffer.from(initializationVector, "base64");
 
-    if (aesKey.length !== 32) {
-      return res.status(400).json({ error: "AES key must be 32 bytes" });
-    }
-    if (iv.length !== 16) {
-      return res.status(400).json({ error: "IV must be 16 bytes" });
-    }
-
     const cipher = crypto.createCipheriv("aes-256-cbc", aesKey, iv);
-    const encryptedBuffer = Buffer.concat([
+    const cipherText = Buffer.concat([
       cipher.update(invoiceBuffer),
       cipher.final()
     ]);
+
+    const encryptedBuffer = Buffer.concat([iv, cipherText]);
 
     return res.json({
       invoiceHash: sha256Base64(invoiceBuffer),
@@ -155,10 +135,7 @@ app.post("/encrypt-document", async (req, res) => {
   }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Server running on port ${PORT}`);
-});
+// 4) SEND INVOICE (FINAL)
 app.post("/send-invoice", async (req, res) => {
   try {
     const {
@@ -169,51 +146,26 @@ app.post("/send-invoice", async (req, res) => {
       initializationVector
     } = req.body;
 
-    if (!accessToken || typeof accessToken !== "string") {
-      return res.status(400).json({ error: "Brak accessToken" });
-    }
-    if (!sessionReferenceNumber || typeof sessionReferenceNumber !== "string") {
-      return res.status(400).json({ error: "Brak sessionReferenceNumber" });
-    }
-    if (!xmlText || typeof xmlText !== "string") {
-      return res.status(400).json({ error: "Brak xmlText" });
-    }
-    if (!aesKeyBase64 || typeof aesKeyBase64 !== "string") {
-      return res.status(400).json({ error: "Brak aesKeyBase64" });
-    }
-    if (!initializationVector || typeof initializationVector !== "string") {
-      return res.status(400).json({ error: "Brak initializationVector" });
-    }
-
     const invoiceBuffer = Buffer.from(xmlText, "utf8");
     const aesKey = Buffer.from(aesKeyBase64, "base64");
     const iv = Buffer.from(initializationVector, "base64");
 
-    if (aesKey.length !== 32) {
-      return res.status(400).json({ error: "AES key must be 32 bytes" });
-    }
-    if (iv.length !== 16) {
-      return res.status(400).json({ error: "IV must be 16 bytes" });
-    }
-
     const cipher = crypto.createCipheriv("aes-256-cbc", aesKey, iv);
-    const encryptedBuffer = Buffer.concat([
+    const cipherText = Buffer.concat([
       cipher.update(invoiceBuffer),
       cipher.final()
     ]);
 
-    const fileHash = crypto.createHash("sha256").update(invoiceBuffer).digest("base64");
-const encryptedDocumentHash = crypto.createHash("sha256").update(encryptedBuffer).digest("base64");
+    // KLUCZOWE — IV NA POCZĄTKU
+    const encryptedBuffer = Buffer.concat([iv, cipherText]);
 
-const payload = {
-  fileHash: fileHash,
-  invoiceHash: fileHash,
-  fileSize: invoiceBuffer.length,
-  invoiceSize: invoiceBuffer.length,
-  encryptedDocumentHash: encryptedDocumentHash,
-  encryptedDocumentSize: encryptedBuffer.length,
-  encryptedDocumentContent: encryptedBuffer.toString("base64")
-};
+    const payload = {
+      invoiceHash: sha256Base64(invoiceBuffer),
+      invoiceSize: invoiceBuffer.length,
+      encryptedDocumentHash: sha256Base64(encryptedBuffer),
+      encryptedDocumentSize: encryptedBuffer.length,
+      encryptedDocumentContent: encryptedBuffer.toString("base64")
+    };
 
     const rawBody = JSON.stringify(payload);
 
@@ -240,7 +192,6 @@ const payload = {
 
     return res.status(ksefResp.status).json({
       requestPayload: payload,
-      rawRequestBody: rawBody,
       ksefStatus: ksefResp.status,
       ksefResponse: parsed
     });
@@ -248,4 +199,9 @@ const payload = {
     console.error("POST /send-invoice error:", e);
     return res.status(500).json({ error: e.message });
   }
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`Server running on port ${PORT}`);
 });
