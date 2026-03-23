@@ -52,7 +52,6 @@ app.get("/", (req, res) => {
   res.json({ ok: true, message: "ksef-helper works" });
 });
 
-// 1) Encrypt token
 app.post("/encrypt-token", async (req, res) => {
   try {
     const { plainText } = req.body;
@@ -81,7 +80,6 @@ app.post("/encrypt-token", async (req, res) => {
   }
 });
 
-// 2) Session encryption
 app.post("/session-encryption", async (req, res) => {
   try {
     const publicKeyPem = await getKsefPublicKeyByUsage("SymmetricKeyEncryption");
@@ -109,50 +107,9 @@ app.post("/session-encryption", async (req, res) => {
   }
 });
 
-// 3) Encrypt document (debug)
 app.post("/encrypt-document", async (req, res) => {
   try {
     const { xmlText, aesKeyBase64, initializationVector } = req.body;
-
-    const invoiceBuffer = Buffer.from(xmlText, "utf8");
-    const aesKey = Buffer.from(aesKeyBase64, "base64");
-    const iv = Buffer.from(initializationVector, "base64");
-
-    const cipher = crypto.createCipheriv("aes-256-cbc", aesKey, iv);
-    const cipherText = Buffer.concat([
-      cipher.update(invoiceBuffer),
-      cipher.final()
-    ]);
-
-    const encryptedBuffer = Buffer.concat([iv, cipherText]);
-
-    return res.json({
-      invoiceHash: sha256Base64(invoiceBuffer),
-      invoiceSize: invoiceBuffer.length,
-      encryptedDocumentHash: sha256Base64(encryptedBuffer),
-      encryptedDocumentSize: encryptedBuffer.length,
-      encryptedDocumentContent: encryptedBuffer.toString("base64")
-    });
-  } catch (e) {
-    console.error("POST /encrypt-document error:", e);
-    return res.status(500).json({ error: e.message });
-  }
-});
-
-// 4) SEND INVOICE (FINAL)
-app.post("/send-invoice", async (req, res) => {
-  try {
-    const {
-      accessToken,
-      sessionReferenceNumber,
-      xmlText,
-      aesKeyBase64,
-      initializationVector
-    } = req.body;
-
-    if (!accessToken) return res.status(400).json({ error: "Brak accessToken" });
-    if (!sessionReferenceNumber) return res.status(400).json({ error: "Brak sessionReferenceNumber" });
-    if (!xmlText) return res.status(400).json({ error: "Brak xmlText" });
 
     const invoiceBuffer = Buffer.from(xmlText, "utf8");
     const aesKey = Buffer.from(aesKeyBase64, "base64");
@@ -171,23 +128,84 @@ app.post("/send-invoice", async (req, res) => {
       cipher.final()
     ]);
 
-    // KLUCZOWE: IV NA POCZĄTKU
     const encryptedBuffer = Buffer.concat([iv, cipherText]);
 
-    const invoiceHash = sha256Base64(invoiceBuffer);
-    const invoiceSize = invoiceBuffer.length;
+    return res.json({
+      fileHash: sha256Base64(invoiceBuffer),
+      invoiceHash: sha256Base64(invoiceBuffer),
+      fileSize: invoiceBuffer.length,
+      invoiceSize: invoiceBuffer.length,
+      encryptedDocumentHash: sha256Base64(encryptedBuffer),
+      encryptedDocumentSize: encryptedBuffer.length,
+      encryptedDocumentContent: encryptedBuffer.toString("base64")
+    });
+  } catch (e) {
+    console.error("POST /encrypt-document error:", e);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/send-invoice", async (req, res) => {
+  try {
+    const {
+      accessToken,
+      sessionReferenceNumber,
+      xmlText,
+      aesKeyBase64,
+      initializationVector
+    } = req.body;
+
+    if (!accessToken || typeof accessToken !== "string") {
+      return res.status(400).json({ error: "Brak accessToken" });
+    }
+    if (!sessionReferenceNumber || typeof sessionReferenceNumber !== "string") {
+      return res.status(400).json({ error: "Brak sessionReferenceNumber" });
+    }
+    if (!xmlText || typeof xmlText !== "string") {
+      return res.status(400).json({ error: "Brak xmlText" });
+    }
+    if (!aesKeyBase64 || typeof aesKeyBase64 !== "string") {
+      return res.status(400).json({ error: "Brak aesKeyBase64" });
+    }
+    if (!initializationVector || typeof initializationVector !== "string") {
+      return res.status(400).json({ error: "Brak initializationVector" });
+    }
+
+    const invoiceBuffer = Buffer.from(xmlText, "utf8");
+    const aesKey = Buffer.from(aesKeyBase64, "base64");
+    const iv = Buffer.from(initializationVector, "base64");
+
+    if (aesKey.length !== 32) {
+      return res.status(400).json({ error: "AES key must be 32 bytes" });
+    }
+    if (iv.length !== 16) {
+      return res.status(400).json({ error: "IV must be 16 bytes" });
+    }
+
+    const cipher = crypto.createCipheriv("aes-256-cbc", aesKey, iv);
+    const cipherText = Buffer.concat([
+      cipher.update(invoiceBuffer),
+      cipher.final()
+    ]);
+
+    const encryptedBuffer = Buffer.concat([iv, cipherText]);
+
+    const plainHash = sha256Base64(invoiceBuffer);
 
     const payload = {
-      fileHash: invoiceHash,
-      invoiceHash: invoiceHash,
-      fileSize: invoiceSize,
-      invoiceSize: invoiceSize,
+      fileHash: plainHash,
+      invoiceHash: plainHash,
+      fileSize: invoiceBuffer.length,
+      invoiceSize: invoiceBuffer.length,
       encryptedDocumentHash: sha256Base64(encryptedBuffer),
       encryptedDocumentSize: encryptedBuffer.length,
       encryptedDocumentContent: encryptedBuffer.toString("base64")
     };
 
     const rawBody = JSON.stringify(payload);
+
+    console.log("SEND RAW BODY:", rawBody);
+    console.log("SEND RAW BODY LENGTH:", Buffer.byteLength(rawBody, "utf8"));
 
     const ksefResp = await fetch(
       `https://api-test.ksef.mf.gov.pl/v2/sessions/online/${sessionReferenceNumber}/invoices`,
@@ -211,11 +229,14 @@ app.post("/send-invoice", async (req, res) => {
     }
 
     return res.status(ksefResp.status).json({
+      xmlCharLength: xmlText.length,
+      xmlByteLength: invoiceBuffer.length,
       requestPayload: payload,
+      rawRequestBody: rawBody,
+      rawRequestBodyLength: Buffer.byteLength(rawBody, "utf8"),
       ksefStatus: ksefResp.status,
       ksefResponse: parsed
     });
-
   } catch (e) {
     console.error("POST /send-invoice error:", e);
     return res.status(500).json({ error: e.message });
