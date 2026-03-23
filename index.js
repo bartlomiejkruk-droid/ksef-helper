@@ -23,6 +23,10 @@ async function getKsefPublicKeyByUsage(requiredUsage) {
 
   const data = await resp.json();
 
+  if (!Array.isArray(data)) {
+    throw new Error(`Unexpected certificates response type`);
+  }
+
   const certObj = data.find(c =>
     Array.isArray(c.usage) && c.usage.includes(requiredUsage)
   );
@@ -105,7 +109,7 @@ app.post("/session-encryption", async (req, res) => {
   }
 });
 
-// 3) Encrypt document (debug / test)
+// 3) Encrypt document (debug)
 app.post("/encrypt-document", async (req, res) => {
   try {
     const { xmlText, aesKeyBase64, initializationVector } = req.body;
@@ -146,9 +150,20 @@ app.post("/send-invoice", async (req, res) => {
       initializationVector
     } = req.body;
 
+    if (!accessToken) return res.status(400).json({ error: "Brak accessToken" });
+    if (!sessionReferenceNumber) return res.status(400).json({ error: "Brak sessionReferenceNumber" });
+    if (!xmlText) return res.status(400).json({ error: "Brak xmlText" });
+
     const invoiceBuffer = Buffer.from(xmlText, "utf8");
     const aesKey = Buffer.from(aesKeyBase64, "base64");
     const iv = Buffer.from(initializationVector, "base64");
+
+    if (aesKey.length !== 32) {
+      return res.status(400).json({ error: "AES key must be 32 bytes" });
+    }
+    if (iv.length !== 16) {
+      return res.status(400).json({ error: "IV must be 16 bytes" });
+    }
 
     const cipher = crypto.createCipheriv("aes-256-cbc", aesKey, iv);
     const cipherText = Buffer.concat([
@@ -156,12 +171,17 @@ app.post("/send-invoice", async (req, res) => {
       cipher.final()
     ]);
 
-    // KLUCZOWE — IV NA POCZĄTKU
+    // KLUCZOWE: IV NA POCZĄTKU
     const encryptedBuffer = Buffer.concat([iv, cipherText]);
 
+    const invoiceHash = sha256Base64(invoiceBuffer);
+    const invoiceSize = invoiceBuffer.length;
+
     const payload = {
-      invoiceHash: sha256Base64(invoiceBuffer),
-      invoiceSize: invoiceBuffer.length,
+      fileHash: invoiceHash,
+      invoiceHash: invoiceHash,
+      fileSize: invoiceSize,
+      invoiceSize: invoiceSize,
       encryptedDocumentHash: sha256Base64(encryptedBuffer),
       encryptedDocumentSize: encryptedBuffer.length,
       encryptedDocumentContent: encryptedBuffer.toString("base64")
@@ -195,6 +215,7 @@ app.post("/send-invoice", async (req, res) => {
       ksefStatus: ksefResp.status,
       ksefResponse: parsed
     });
+
   } catch (e) {
     console.error("POST /send-invoice error:", e);
     return res.status(500).json({ error: e.message });
