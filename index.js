@@ -482,6 +482,59 @@ function extractDuplicateInfoFromFailedResponse(failedBody) {
   };
 }
 
+function extractSuccessfulEndpointError(successfulBody) {
+  const source = successfulBody?.ksefResponse || successfulBody?.response || successfulBody || {};
+
+  const exceptionCode =
+    source?.exceptionCode ||
+    source?.exception?.code ||
+    source?.error?.code ||
+    "";
+
+  const exceptionDescription =
+    source?.exceptionDescription ||
+    source?.exception?.description ||
+    source?.error?.description ||
+    source?.message ||
+    "";
+
+  let details = [];
+
+  if (Array.isArray(source?.exceptionDetailList)) {
+    details = source.exceptionDetailList;
+  } else if (Array.isArray(source?.details)) {
+    details = source.details;
+  }
+
+  let flattenedMessages = [];
+
+  for (const item of details) {
+    if (Array.isArray(item?.details)) {
+      flattenedMessages = flattenedMessages.concat(item.details.map(x => String(x)));
+    }
+    if (item?.exceptionDescription) {
+      flattenedMessages.push(String(item.exceptionDescription));
+    }
+    if (item?.message) {
+      flattenedMessages.push(String(item.message));
+    }
+  }
+
+  const joined = flattenedMessages.join(" | ").toLowerCase();
+  const formatError =
+    joined.includes("invoicereferencenumber is not in the correct format") ||
+    joined.includes("reference number is not in the correct format");
+
+  return {
+    hasError: Boolean(exceptionCode || exceptionDescription || details.length > 0),
+    exceptionCode: exceptionCode ? String(exceptionCode) : "",
+    exceptionDescription: String(exceptionDescription || ""),
+    exceptionDetailList: details,
+    flattenedMessages,
+    isReferenceFormatError: formatError
+  };
+}
+
 async function getSessionStatus(accessToken, sessionReferenceNumber) {
   const endpoint = SESSION_STATUS_PATH(sessionReferenceNumber);
   const result = await callKsef(endpoint, accessToken);
@@ -800,6 +853,7 @@ app.post("/session-successful", async (req, res) => {
     const selectedInvoice = pickBestInvoice(invoices);
     const referenceNumber = extractReferenceNumber(selectedInvoice);
     const ksefNumber = extractKsefNumber(selectedInvoice);
+    const successfulError = extractSuccessfulEndpointError(result.body);
 
     return res.status(result.status).json({
       baseUrl: KSEF_BASE_URL,
@@ -810,6 +864,7 @@ app.post("/session-successful", async (req, res) => {
       selectedKsefNumber: ksefNumber,
       selectedInvoice,
       successfulInvoicesParsed: invoices,
+      successfulEndpointError: successfulError,
       ksefResponse: result.body
     });
   } catch (e) {
@@ -887,6 +942,7 @@ app.post("/session-debug", async (req, res) => {
     const successfulInvoices = extractInvoiceList(successfulResult.body);
     const selectedInvoice = pickBestInvoice(successfulInvoices);
     const duplicateInfo = extractDuplicateInfoFromFailedResponse(failedResult.body);
+    const successfulError = extractSuccessfulEndpointError(successfulResult.body);
 
     return res.json({
       baseUrl: KSEF_BASE_URL,
@@ -917,6 +973,7 @@ app.post("/session-debug", async (req, res) => {
         selectedKsefNumber: extractKsefNumber(selectedInvoice),
         selectedInvoice,
         successfulInvoicesParsed: successfulInvoices,
+        successfulEndpointError: successfulError,
         response: successfulResult.body
       }
     });
@@ -1079,14 +1136,20 @@ app.post("/finalize-session", async (req, res) => {
     let invoices = [];
     let selectedInvoice = null;
     let successPollsPerformed = 0;
+    let successfulError = null;
 
     for (let s = 0; s < pollCount; s++) {
       successfulResult = await getSessionSuccessful(accessToken, sessionReferenceNumber);
       invoices = extractInvoiceList(successfulResult.body);
       selectedInvoice = pickBestInvoice(invoices);
+      successfulError = extractSuccessfulEndpointError(successfulResult.body);
       successPollsPerformed = s + 1;
 
       if (selectedInvoice && (extractReferenceNumber(selectedInvoice) || extractKsefNumber(selectedInvoice))) {
+        break;
+      }
+
+      if (successfulError?.isReferenceFormatError) {
         break;
       }
 
@@ -1098,22 +1161,55 @@ app.post("/finalize-session", async (req, res) => {
     console.log("SUCCESSFUL RAW:", JSON.stringify(successfulResult?.body, null, 2));
     console.log("SUCCESSFUL PARSED COUNT:", invoices.length);
     console.log("SUCCESSFUL SELECTED INVOICE:", selectedInvoice);
+    console.log("SUCCESSFUL ERROR:", successfulError);
+
+    let closeResult = null;
+    if (closeAfter) {
+      closeResult = await closeSession(accessToken, sessionReferenceNumber);
+    }
 
     if (!selectedInvoice) {
-      let closeResult = null;
-      if (closeAfter) {
-        closeResult = await closeSession(accessToken, sessionReferenceNumber);
+      if (summary.successfulInvoiceCount > 0 && successfulError?.hasError) {
+        return res.status(200).json({
+          ok: true,
+          processed: true,
+          accepted: false,
+          isDuplicate: false,
+          needsManualKsefNumberFetch: true,
+          sessionReferenceNumber,
+          sessionStatusCode: summary.statusCode,
+          sessionStatusDescription: summary.statusDescription,
+          invoiceCount: summary.invoiceCount,
+          successfulInvoiceCount: summary.successfulInvoiceCount,
+          failedInvoiceCount: summary.failedInvoiceCount,
+          successfulEndpoint: successfulResult?.endpoint || "",
+          successfulResponse: successfulResult?.body || null,
+          successfulEndpointError: successfulError,
+          successfulInvoicesParsed: invoices,
+          successPollsPerformed,
+          closeAttempted: closeAfter,
+          closeResponse: closeResult
+            ? {
+                endpoint: closeResult.endpoint,
+                httpStatus: closeResult.status,
+                response: closeResult.body
+              }
+            : null,
+          message: "Faktura przetworzona, ale nie udało się odczytać numeru KSeF z endpointu successful"
+        });
       }
 
       return res.status(200).json({
         ok: false,
         processed: true,
         accepted: false,
+        isDuplicate: false,
         sessionReferenceNumber,
         sessionStatusCode: summary.statusCode,
         sessionStatusDescription: summary.statusDescription,
         successfulEndpoint: successfulResult?.endpoint || "",
         successfulResponse: successfulResult?.body || null,
+        successfulEndpointError: successfulError,
         successfulInvoicesParsed: invoices,
         successPollsPerformed,
         closeAttempted: closeAfter,
@@ -1156,16 +1252,12 @@ app.post("/finalize-session", async (req, res) => {
       }
     }
 
-    let closeResult = null;
-    if (closeAfter) {
-      closeResult = await closeSession(accessToken, sessionReferenceNumber);
-    }
-
     return res.status(200).json({
       ok: true,
       processed: true,
       accepted: true,
       isDuplicate: false,
+      needsManualKsefNumberFetch: false,
       sessionReferenceNumber,
       sessionStatusCode: summary.statusCode,
       sessionStatusDescription: summary.statusDescription,
@@ -1180,6 +1272,7 @@ app.post("/finalize-session", async (req, res) => {
       selectedKsefNumber: ksefNumber,
       selectedInvoice,
       successfulInvoicesParsed: invoices,
+      successfulEndpointError: successfulError,
       successPollsPerformed,
       upoReady,
       upo: upoResult
