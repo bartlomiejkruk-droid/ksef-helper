@@ -3,10 +3,7 @@ import crypto from "crypto";
 
 const app = express();
 
-// normalny JSON
 app.use(express.json({ limit: "20mb" }));
-
-// fallback na wypadek, gdyby Zoho przysłało tekst zamiast poprawnego JSON-a
 app.use(express.text({ type: ["text/*", "application/*"], limit: "20mb" }));
 
 const KSEF_BASE_URL = process.env.KSEF_BASE_URL || "https://api-demo.ksef.mf.gov.pl";
@@ -20,12 +17,19 @@ function safeParseBody(req) {
   if (typeof req.body === "string") {
     try {
       return JSON.parse(req.body);
-    } catch {
+    } catch (e) {
       throw new Error("Body nie jest poprawnym JSON-em");
     }
   }
 
   throw new Error("Nie udało się odczytać request body");
+}
+
+function requireString(obj, key) {
+  if (!obj[key] || typeof obj[key] !== "string") {
+    throw new Error(`Brak lub błędne pole: ${key}`);
+  }
+  return obj[key];
 }
 
 function toPemCertificate(base64Cert) {
@@ -94,25 +98,18 @@ function encryptXml(xmlText, aesKeyBase64, initializationVector) {
     cipher.final()
   ]);
 
-  // Zostawiamy układ jak u Ciebie: IV + ciphertext
+  // Zostawiamy IV na początku, tak jak miałeś wcześniej
   const encryptedBuffer = Buffer.concat([iv, cipherText]);
 
   return {
     xmlBuffer,
     encryptedBuffer,
-    invoiceHash: sha256Base64(xmlBuffer),
-    invoiceSize: xmlBuffer.length,
+    fileHash: sha256Base64(xmlBuffer),
+    fileSize: xmlBuffer.length,
     encryptedDocumentHash: sha256Base64(encryptedBuffer),
     encryptedDocumentSize: encryptedBuffer.length,
     encryptedDocumentContent: encryptedBuffer.toString("base64")
   };
-}
-
-function requireString(obj, key) {
-  if (!obj[key] || typeof obj[key] !== "string") {
-    throw new Error(`Brak lub błędne pole: ${key}`);
-  }
-  return obj[key];
 }
 
 app.get("/", (req, res) => {
@@ -186,8 +183,8 @@ app.post("/encrypt-document", async (req, res) => {
     const encrypted = encryptXml(xmlText, aesKeyBase64, initializationVector);
 
     return res.json({
-      invoiceHash: encrypted.invoiceHash,
-      invoiceSize: encrypted.invoiceSize,
+      fileHash: encrypted.fileHash,
+      fileSize: encrypted.fileSize,
       encryptedDocumentHash: encrypted.encryptedDocumentHash,
       encryptedDocumentSize: encrypted.encryptedDocumentSize,
       encryptedDocumentContent: encrypted.encryptedDocumentContent
@@ -210,11 +207,9 @@ app.post("/send-invoice", async (req, res) => {
 
     const encrypted = encryptXml(xmlText, aesKeyBase64, initializationVector);
 
-    // KLUCZOWA ZMIANA:
-    // wysyłamy invoiceHash / invoiceSize, bez fileHash / fileSize
     const payload = {
-      invoiceHash: encrypted.invoiceHash,
-      invoiceSize: encrypted.invoiceSize,
+      fileHash: encrypted.fileHash,
+      fileSize: encrypted.fileSize,
       encryptedDocumentHash: encrypted.encryptedDocumentHash,
       encryptedDocumentSize: encrypted.encryptedDocumentSize,
       encryptedDocumentContent: encrypted.encryptedDocumentContent
@@ -227,8 +222,8 @@ app.post("/send-invoice", async (req, res) => {
     console.log("endpoint:", endpoint);
     console.log("xmlCharLength:", xmlText.length);
     console.log("xmlByteLength:", encrypted.xmlBuffer.length);
-    console.log("invoiceHash:", payload.invoiceHash);
-    console.log("invoiceSize:", payload.invoiceSize);
+    console.log("fileHash:", payload.fileHash);
+    console.log("fileSize:", payload.fileSize);
     console.log("encryptedDocumentHash:", payload.encryptedDocumentHash);
     console.log("encryptedDocumentSize:", payload.encryptedDocumentSize);
     console.log("rawRequestBodyLength:", Buffer.byteLength(rawBody, "utf8"));
@@ -270,29 +265,34 @@ app.post("/send-invoice", async (req, res) => {
   }
 });
 
-// wariant: gdybyś chciał wysyłać już gotowy payload z Zoho
 app.post("/send-invoice-raw", async (req, res) => {
   try {
     const body = safeParseBody(req);
 
     const accessToken = requireString(body, "accessToken");
     const sessionReferenceNumber = requireString(body, "sessionReferenceNumber");
+    const fileHash = requireString(body, "fileHash");
+    const encryptedDocumentHash = requireString(body, "encryptedDocumentHash");
+    const encryptedDocumentContent = requireString(body, "encryptedDocumentContent");
 
-    const payload = {
-      invoiceHash: requireString(body, "invoiceHash"),
-      invoiceSize: Number(body.invoiceSize),
-      encryptedDocumentHash: requireString(body, "encryptedDocumentHash"),
-      encryptedDocumentSize: Number(body.encryptedDocumentSize),
-      encryptedDocumentContent: requireString(body, "encryptedDocumentContent")
-    };
+    const fileSize = Number(body.fileSize);
+    const encryptedDocumentSize = Number(body.encryptedDocumentSize);
 
-    if (!Number.isFinite(payload.invoiceSize) || payload.invoiceSize <= 0) {
-      throw new Error("invoiceSize musi być dodatnią liczbą");
+    if (!Number.isFinite(fileSize) || fileSize <= 0) {
+      throw new Error("fileSize musi być dodatnią liczbą");
     }
 
-    if (!Number.isFinite(payload.encryptedDocumentSize) || payload.encryptedDocumentSize <= 0) {
+    if (!Number.isFinite(encryptedDocumentSize) || encryptedDocumentSize <= 0) {
       throw new Error("encryptedDocumentSize musi być dodatnią liczbą");
     }
+
+    const payload = {
+      fileHash,
+      fileSize,
+      encryptedDocumentHash,
+      encryptedDocumentSize,
+      encryptedDocumentContent
+    };
 
     const rawBody = JSON.stringify(payload);
     const endpoint = `${KSEF_BASE_URL}/v2/sessions/online/${sessionReferenceNumber}/invoices`;
