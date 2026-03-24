@@ -46,6 +46,24 @@ function safeParseBody(req) {
   throw new Error("Nie udało się odczytać request body");
 }
 
+function extractInvoiceReferenceNumberFromSendResponse(anyBody) {
+  const source =
+    anyBody?.ksefResponse ||
+    anyBody?.response ||
+    anyBody?.data ||
+    anyBody ||
+    {};
+
+  return (
+    source?.referenceNumber ||
+    source?.invoiceReferenceNumber ||
+    source?.elementReferenceNumber ||
+    source?.invoice?.referenceNumber ||
+    source?.invoice?.invoiceReferenceNumber ||
+    ""
+  );
+}
+
 function requireString(obj, key) {
   if (!obj[key] || typeof obj[key] !== "string") {
     throw new Error(`Brak lub błędne pole: ${key}`);
