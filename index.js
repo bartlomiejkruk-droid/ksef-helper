@@ -10,19 +10,12 @@ const KSEF_BASE_URL = process.env.KSEF_BASE_URL || "https://api-demo.ksef.mf.gov
 const PORT = process.env.PORT || 3000;
 
 /**
- * Ścieżki KSeF
+ * UWAGA:
+ * Te 3 ścieżki mogą wymagać dopasowania 1:1 do Twojej wersji OpenAPI KSeF.
+ * Zostawiłem je w jednym miejscu, żebyś nie szukał po całym kodzie.
  */
 const SUCCESSFUL_INVOICES_PATH = (sessionReferenceNumber) =>
   `${KSEF_BASE_URL}/v2/sessions/${sessionReferenceNumber}/invoices/successful`;
-
-const FAILED_INVOICES_PATH = (sessionReferenceNumber) =>
-  `${KSEF_BASE_URL}/v2/sessions/${sessionReferenceNumber}/invoices/failed`;
-
-const SESSION_STATUS_PATH = (sessionReferenceNumber) =>
-  `${KSEF_BASE_URL}/v2/sessions/${sessionReferenceNumber}`;
-
-const SEND_INVOICE_PATH = (sessionReferenceNumber) =>
-  `${KSEF_BASE_URL}/v2/sessions/online/${sessionReferenceNumber}/invoices`;
 
 const UPO_PATH = (sessionReferenceNumber, referenceNumber) =>
   `${KSEF_BASE_URL}/v2/sessions/${sessionReferenceNumber}/invoices/${referenceNumber}/upo`;
@@ -234,14 +227,6 @@ function extractInvoiceList(anyBody) {
     return source.invoices;
   }
 
-  if (Array.isArray(source?.items)) {
-    return source.items;
-  }
-
-  if (Array.isArray(source?.data)) {
-    return source.data;
-  }
-
   if (Array.isArray(source)) {
     return source;
   }
@@ -254,22 +239,6 @@ function extractFirstSuccessfulInvoice(successBody) {
   return invoices.length > 0 ? invoices[0] : null;
 }
 
-function extractReferenceNumber(invoiceObj) {
-  if (!invoiceObj || typeof invoiceObj !== "object") {
-    return "";
-  }
-
-  return (
-    invoiceObj.referenceNumber ||
-    invoiceObj.referenceNo ||
-    invoiceObj.invoiceReferenceNumber ||
-    invoiceObj?.metadata?.referenceNumber ||
-    invoiceObj?.invoiceMetadata?.referenceNumber ||
-    invoiceObj?.invoice?.referenceNumber ||
-    ""
-  );
-}
-
 function extractKsefNumber(invoiceObj) {
   if (!invoiceObj || typeof invoiceObj !== "object") {
     return "";
@@ -280,7 +249,6 @@ function extractKsefNumber(invoiceObj) {
     invoiceObj.ksefReferenceNumber ||
     invoiceObj.ksefReferenceNo ||
     invoiceObj.invoiceKsefNumber ||
-    invoiceObj?.invoice?.ksefNumber ||
     ""
   );
 }
@@ -296,7 +264,7 @@ function buildPdfFileName(referenceNumber) {
 }
 
 async function getSessionStatus(accessToken, sessionReferenceNumber) {
-  const endpoint = SESSION_STATUS_PATH(sessionReferenceNumber);
+  const endpoint = `${KSEF_BASE_URL}/v2/sessions/${sessionReferenceNumber}`;
   const result = await callKsef(endpoint, accessToken);
 
   return {
@@ -306,7 +274,7 @@ async function getSessionStatus(accessToken, sessionReferenceNumber) {
 }
 
 async function getSessionFailed(accessToken, sessionReferenceNumber) {
-  const endpoint = FAILED_INVOICES_PATH(sessionReferenceNumber);
+  const endpoint = `${KSEF_BASE_URL}/v2/sessions/${sessionReferenceNumber}/invoices/failed`;
   const result = await callKsef(endpoint, accessToken);
 
   return {
@@ -477,7 +445,7 @@ app.post("/send-invoice", async (req, res) => {
     };
 
     const rawBody = JSON.stringify(payload);
-    const endpoint = SEND_INVOICE_PATH(sessionReferenceNumber);
+    const endpoint = `${KSEF_BASE_URL}/v2/sessions/online/${sessionReferenceNumber}/invoices`;
 
     console.log("=== KSEF SEND DEBUG ===");
     console.log("endpoint:", endpoint);
@@ -528,7 +496,7 @@ app.post("/send-invoice-raw", async (req, res) => {
     };
 
     const rawBody = JSON.stringify(payload);
-    const endpoint = SEND_INVOICE_PATH(sessionReferenceNumber);
+    const endpoint = `${KSEF_BASE_URL}/v2/sessions/online/${sessionReferenceNumber}/invoices`;
 
     const result = await callKsef(endpoint, accessToken, {
       method: "POST",
@@ -600,19 +568,11 @@ app.post("/session-successful", async (req, res) => {
     const sessionReferenceNumber = requireString(body, "sessionReferenceNumber");
 
     const result = await getSessionSuccessful(accessToken, sessionReferenceNumber);
-    const invoices = extractInvoiceList(result.body);
-    const firstInvoice = invoices.length > 0 ? invoices[0] : null;
-    const referenceNumber = extractReferenceNumber(firstInvoice);
-    const ksefNumber = extractKsefNumber(firstInvoice);
 
     return res.status(result.status).json({
       baseUrl: KSEF_BASE_URL,
       endpoint: result.endpoint,
       ksefStatus: result.status,
-      invoiceCountParsed: invoices.length,
-      referenceNumber,
-      ksefNumber,
-      firstInvoice,
       ksefResponse: result.body
     });
   } catch (e) {
@@ -677,8 +637,8 @@ app.post("/session-debug", async (req, res) => {
     const accessToken = requireString(body, "accessToken");
     const sessionReferenceNumber = requireString(body, "sessionReferenceNumber");
 
-    const statusEndpoint = SESSION_STATUS_PATH(sessionReferenceNumber);
-    const failedEndpoint = FAILED_INVOICES_PATH(sessionReferenceNumber);
+    const statusEndpoint = `${KSEF_BASE_URL}/v2/sessions/${sessionReferenceNumber}`;
+    const failedEndpoint = `${KSEF_BASE_URL}/v2/sessions/${sessionReferenceNumber}/invoices/failed`;
     const successfulEndpoint = SUCCESSFUL_INVOICES_PATH(sessionReferenceNumber);
 
     const [statusResult, failedResult, successfulResult] = await Promise.all([
@@ -686,9 +646,6 @@ app.post("/session-debug", async (req, res) => {
       callKsef(failedEndpoint, accessToken),
       callKsef(successfulEndpoint, accessToken)
     ]);
-
-    const successfulInvoices = extractInvoiceList(successfulResult.body);
-    const firstSuccessfulInvoice = successfulInvoices.length > 0 ? successfulInvoices[0] : null;
 
     return res.json({
       baseUrl: KSEF_BASE_URL,
@@ -706,10 +663,6 @@ app.post("/session-debug", async (req, res) => {
       successful: {
         endpoint: successfulEndpoint,
         httpStatus: successfulResult.status,
-        parsedInvoiceCount: successfulInvoices.length,
-        firstReferenceNumber: extractReferenceNumber(firstSuccessfulInvoice),
-        firstKsefNumber: extractKsefNumber(firstSuccessfulInvoice),
-        firstInvoice: firstSuccessfulInvoice,
         response: successfulResult.body
       }
     });
@@ -800,19 +753,9 @@ app.post("/finalize-session", async (req, res) => {
     }
 
     const successfulResult = await getSessionSuccessful(accessToken, sessionReferenceNumber);
-    const invoices = extractInvoiceList(successfulResult.body);
-    const firstInvoice = invoices.length > 0 ? invoices[0] : null;
-
-    console.log("SUCCESSFUL RAW:", JSON.stringify(successfulResult.body, null, 2));
-    console.log("SUCCESSFUL PARSED COUNT:", invoices.length);
-    console.log("SUCCESSFUL FIRST INVOICE:", firstInvoice);
+    const firstInvoice = extractFirstSuccessfulInvoice(successfulResult.body);
 
     if (!firstInvoice) {
-      let closeResult = null;
-      if (closeAfter) {
-        closeResult = await closeSession(accessToken, sessionReferenceNumber);
-      }
-
       return res.status(200).json({
         ok: false,
         processed: true,
@@ -822,23 +765,12 @@ app.post("/finalize-session", async (req, res) => {
         sessionStatusDescription: summary.statusDescription,
         successfulEndpoint: successfulResult.endpoint,
         successfulResponse: successfulResult.body,
-        closeAttempted: closeAfter,
-        closeResponse: closeResult
-          ? {
-              endpoint: closeResult.endpoint,
-              httpStatus: closeResult.status,
-              response: closeResult.body
-            }
-          : null,
         message: "Brak danych pierwszej poprawnej faktury w sesji"
       });
     }
 
-    const referenceNumber = extractReferenceNumber(firstInvoice);
+    const referenceNumber = firstInvoice.referenceNumber || firstInvoice.referenceNo || "";
     const ksefNumber = extractKsefNumber(firstInvoice);
-
-    console.log("REFERENCE NUMBER:", referenceNumber);
-    console.log("KSEF NUMBER:", ksefNumber);
 
     let upoResult = null;
     if (referenceNumber) {
@@ -887,7 +819,7 @@ app.post("/finalize-session", async (req, res) => {
             httpStatus: closeResult.status,
             response: closeResult.body
           }
-          : null,
+        : null,
       message: "Faktura przyjęta; pobrano dane końcowe sesji"
     });
   } catch (e) {
