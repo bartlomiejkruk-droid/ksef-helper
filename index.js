@@ -106,8 +106,9 @@ function encryptXml(xmlText, aesKeyBase64, initializationVector) {
     cipher.final()
   ]);
 
-  // Ten układ już zadziałał u Ciebie na 202 Accepted
-  const encryptedBuffer = Buffer.concat([iv, cipherText]);
+  // KLUCZOWA ZMIANA:
+  // NIE dokładamy IV do encryptedInvoiceContent
+  const encryptedBuffer = cipherText;
 
   return {
     xmlBuffer,
@@ -295,10 +296,6 @@ app.post("/session-status", async (req, res) => {
     const sessionReferenceNumber = requireString(body, "sessionReferenceNumber");
 
     const endpoint = `${KSEF_BASE_URL}/v2/sessions/${sessionReferenceNumber}`;
-
-    console.log("=== SESSION STATUS DEBUG ===");
-    console.log("endpoint:", endpoint);
-
     const result = await callKsef(endpoint, accessToken);
 
     return res.status(result.status).json({
@@ -321,10 +318,6 @@ app.post("/session-failed", async (req, res) => {
     const sessionReferenceNumber = requireString(body, "sessionReferenceNumber");
 
     const endpoint = `${KSEF_BASE_URL}/v2/sessions/${sessionReferenceNumber}/invoices/failed`;
-
-    console.log("=== SESSION FAILED DEBUG ===");
-    console.log("endpoint:", endpoint);
-
     const result = await callKsef(endpoint, accessToken);
 
     return res.status(result.status).json({
@@ -391,11 +384,6 @@ app.post("/send-invoice-raw", async (req, res) => {
 
     const rawBody = JSON.stringify(payload);
     const endpoint = `${KSEF_BASE_URL}/v2/sessions/online/${sessionReferenceNumber}/invoices`;
-
-    console.log("=== KSEF SEND RAW DEBUG ===");
-    console.log("endpoint:", endpoint);
-    console.log("rawRequestBodyLength:", Buffer.byteLength(rawBody, "utf8"));
-    console.log("rawRequestBody:", rawBody);
 
     const result = await callKsef(endpoint, accessToken, {
       method: "POST",
