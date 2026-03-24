@@ -106,7 +106,7 @@ function encryptXml(xmlText, aesKeyBase64, initializationVector) {
     cipher.final()
   ]);
 
-  // Na razie zostawiamy IV na początku zaszyfrowanej treści
+  // Ten układ już zadziałał u Ciebie na 202 Accepted
   const encryptedBuffer = Buffer.concat([iv, cipherText]);
 
   return {
@@ -117,6 +117,34 @@ function encryptXml(xmlText, aesKeyBase64, initializationVector) {
     encryptedInvoiceHash: sha256Base64(encryptedBuffer),
     encryptedInvoiceSize: encryptedBuffer.length,
     encryptedInvoiceContent: encryptedBuffer.toString("base64")
+  };
+}
+
+async function callKsef(url, accessToken, options = {}) {
+  const resp = await fetch(url, {
+    method: options.method || "GET",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      Accept: "application/json",
+      ...(options.body ? { "Content-Type": "application/json" } : {})
+    },
+    ...(options.body ? { body: options.body } : {})
+  });
+
+  const text = await resp.text();
+
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    parsed = { raw: text };
+  }
+
+  return {
+    status: resp.status,
+    ok: resp.ok,
+    body: parsed,
+    raw: text
   };
 }
 
@@ -237,26 +265,12 @@ app.post("/send-invoice", async (req, res) => {
     console.log("rawRequestBodyLength:", Buffer.byteLength(rawBody, "utf8"));
     console.log("rawRequestBody:", rawBody);
 
-    const ksefResp = await fetch(endpoint, {
+    const result = await callKsef(endpoint, accessToken, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json",
-        Accept: "application/json"
-      },
       body: rawBody
     });
 
-    const responseText = await ksefResp.text();
-
-    let parsed;
-    try {
-      parsed = JSON.parse(responseText);
-    } catch {
-      parsed = { raw: responseText };
-    }
-
-    return res.status(ksefResp.status).json({
+    return res.status(result.status).json({
       baseUrl: KSEF_BASE_URL,
       endpoint,
       xmlCharLength: xmlText.length,
@@ -264,11 +278,98 @@ app.post("/send-invoice", async (req, res) => {
       requestPayload: payload,
       rawRequestBody: rawBody,
       rawRequestBodyLength: Buffer.byteLength(rawBody, "utf8"),
-      ksefStatus: ksefResp.status,
-      ksefResponse: parsed
+      ksefStatus: result.status,
+      ksefResponse: result.body
     });
   } catch (e) {
     console.error("POST /send-invoice error:", e);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/session-status", async (req, res) => {
+  try {
+    const body = safeParseBody(req);
+
+    const accessToken = requireString(body, "accessToken");
+    const sessionReferenceNumber = requireString(body, "sessionReferenceNumber");
+
+    const endpoint = `${KSEF_BASE_URL}/v2/sessions/${sessionReferenceNumber}`;
+
+    console.log("=== SESSION STATUS DEBUG ===");
+    console.log("endpoint:", endpoint);
+
+    const result = await callKsef(endpoint, accessToken);
+
+    return res.status(result.status).json({
+      baseUrl: KSEF_BASE_URL,
+      endpoint,
+      ksefStatus: result.status,
+      ksefResponse: result.body
+    });
+  } catch (e) {
+    console.error("POST /session-status error:", e);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/session-failed", async (req, res) => {
+  try {
+    const body = safeParseBody(req);
+
+    const accessToken = requireString(body, "accessToken");
+    const sessionReferenceNumber = requireString(body, "sessionReferenceNumber");
+
+    const endpoint = `${KSEF_BASE_URL}/v2/sessions/${sessionReferenceNumber}/invoices/failed`;
+
+    console.log("=== SESSION FAILED DEBUG ===");
+    console.log("endpoint:", endpoint);
+
+    const result = await callKsef(endpoint, accessToken);
+
+    return res.status(result.status).json({
+      baseUrl: KSEF_BASE_URL,
+      endpoint,
+      ksefStatus: result.status,
+      ksefResponse: result.body
+    });
+  } catch (e) {
+    console.error("POST /session-failed error:", e);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/session-debug", async (req, res) => {
+  try {
+    const body = safeParseBody(req);
+
+    const accessToken = requireString(body, "accessToken");
+    const sessionReferenceNumber = requireString(body, "sessionReferenceNumber");
+
+    const statusEndpoint = `${KSEF_BASE_URL}/v2/sessions/${sessionReferenceNumber}`;
+    const failedEndpoint = `${KSEF_BASE_URL}/v2/sessions/${sessionReferenceNumber}/invoices/failed`;
+
+    const [statusResult, failedResult] = await Promise.all([
+      callKsef(statusEndpoint, accessToken),
+      callKsef(failedEndpoint, accessToken)
+    ]);
+
+    return res.json({
+      baseUrl: KSEF_BASE_URL,
+      sessionReferenceNumber,
+      status: {
+        endpoint: statusEndpoint,
+        httpStatus: statusResult.status,
+        response: statusResult.body
+      },
+      failed: {
+        endpoint: failedEndpoint,
+        httpStatus: failedResult.status,
+        response: failedResult.body
+      }
+    });
+  } catch (e) {
+    console.error("POST /session-debug error:", e);
     return res.status(500).json({ error: e.message });
   }
 });
@@ -296,33 +397,19 @@ app.post("/send-invoice-raw", async (req, res) => {
     console.log("rawRequestBodyLength:", Buffer.byteLength(rawBody, "utf8"));
     console.log("rawRequestBody:", rawBody);
 
-    const ksefResp = await fetch(endpoint, {
+    const result = await callKsef(endpoint, accessToken, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json",
-        Accept: "application/json"
-      },
       body: rawBody
     });
 
-    const responseText = await ksefResp.text();
-
-    let parsed;
-    try {
-      parsed = JSON.parse(responseText);
-    } catch {
-      parsed = { raw: responseText };
-    }
-
-    return res.status(ksefResp.status).json({
+    return res.status(result.status).json({
       baseUrl: KSEF_BASE_URL,
       endpoint,
       requestPayload: payload,
       rawRequestBody: rawBody,
       rawRequestBodyLength: Buffer.byteLength(rawBody, "utf8"),
-      ksefStatus: ksefResp.status,
-      ksefResponse: parsed
+      ksefStatus: result.status,
+      ksefResponse: result.body
     });
   } catch (e) {
     console.error("POST /send-invoice-raw error:", e);
