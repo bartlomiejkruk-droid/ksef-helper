@@ -204,21 +204,24 @@ app.post("/send-invoice", async (req, res) => {
 
     const rawBody = JSON.stringify(payload);
 
-    console.log("SEND RAW BODY:", rawBody);
-    console.log("SEND RAW BODY LENGTH:", Buffer.byteLength(rawBody, "utf8"));
+console.log("=== FINAL CHECK ===");
+console.log("fileHash:", payload.fileHash);
+console.log("rawBody contains fileHash:", rawBody.includes("fileHash"));
+console.log("rawBody:", rawBody);
+console.log("rawBody length:", Buffer.byteLength(rawBody, "utf8"));
 
-    const ksefResp = await fetch(
-      `https://api-test.ksef.mf.gov.pl/v2/sessions/online/${sessionReferenceNumber}/invoices`,
-      {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${accessToken}`,
-          "Content-Type": "application/json",
-          "Accept": "application/json"
-        },
-        body: rawBody
-      }
-    );
+const ksefResp = await fetch(
+  `https://api-test.ksef.mf.gov.pl/v2/sessions/online/${sessionReferenceNumber}/invoices`,
+  {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${accessToken}`,
+      "Content-Type": "application/json; charset=utf-8", // 🔴 DODAJ TO
+      "Accept": "application/json"
+    },
+    body: rawBody
+  }
+);
 
     const text = await ksefResp.text();
     let parsed;
