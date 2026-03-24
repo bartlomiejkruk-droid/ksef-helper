@@ -12,8 +12,8 @@ const PORT = process.env.PORT || 3000;
 /**
  * Ścieżki KSeF
  */
-const SUCCESSFUL_INVOICES_PATH = (sessionReferenceNumber) =>
-  `${KSEF_BASE_URL}/v2/sessions/${sessionReferenceNumber}/invoices/successful`;
+const INVOICE_STATUS_PATH = (sessionReferenceNumber, invoiceReferenceNumber) =>
+  `${KSEF_BASE_URL}/v2/sessions/${sessionReferenceNumber}/invoices/${encodeURIComponent(invoiceReferenceNumber)}`;
 
 const FAILED_INVOICES_PATH = (sessionReferenceNumber) =>
   `${KSEF_BASE_URL}/v2/sessions/${sessionReferenceNumber}/invoices/failed`;
@@ -44,6 +44,16 @@ function safeParseBody(req) {
   }
 
   throw new Error("Nie udało się odczytać request body");
+}
+
+async function getInvoiceStatus(accessToken, sessionReferenceNumber, invoiceReferenceNumber) {
+  const endpoint = INVOICE_STATUS_PATH(sessionReferenceNumber, invoiceReferenceNumber);
+  const result = await callKsef(endpoint, accessToken);
+
+  return {
+    endpoint,
+    ...result
+  };
 }
 
 function extractInvoiceReferenceNumberFromSendResponse(anyBody) {
@@ -753,6 +763,18 @@ app.post("/send-invoice", async (req, res) => {
       body: rawBody
     });
 const invoiceReferenceNumber = extractInvoiceReferenceNumberFromSendResponse(result.body);
+    const invoiceReferenceNumber =
+  result.body?.referenceNumber ||
+  result.body?.invoiceReferenceNumber ||
+  result.body?.ksefResponse?.referenceNumber ||
+  result.body?.ksefResponse?.invoiceReferenceNumber ||
+  "";
+
+return res.status(result.status).json({
+  ...
+  invoiceReferenceNumber,
+  ksefResponse: result.body
+});
 
 return res.status(result.status).json({
   baseUrl: KSEF_BASE_URL,
@@ -1009,6 +1031,7 @@ app.post("/session-debug", async (req, res) => {
 
 app.post("/finalize-session", async (req, res) => {
   try {
+    const invoiceReferenceNumber = requireString(body, "invoiceReferenceNumber");
     const body = safeParseBody(req);
 
     const accessToken = requireString(body, "accessToken");
@@ -1163,10 +1186,21 @@ app.post("/finalize-session", async (req, res) => {
     let successfulError = null;
 
     for (let s = 0; s < pollCount; s++) {
-      successfulResult = await getSessionSuccessful(accessToken, sessionReferenceNumber);
-      invoices = extractInvoiceList(successfulResult.body);
-      selectedInvoice = pickBestInvoice(invoices);
-      successfulError = extractSuccessfulEndpointError(successfulResult.body);
+     successfulResult = await getInvoiceStatus(
+  accessToken,
+  sessionReferenceNumber,
+  invoiceReferenceNumber
+);
+
+selectedInvoice =
+  successfulResult.body?.invoice ||
+  successfulResult.body?.ksefResponse?.invoice ||
+  successfulResult.body?.response?.invoice ||
+  successfulResult.body ||
+  null;
+
+invoices = selectedInvoice ? [selectedInvoice] : [];
+successfulError = extractSuccessfulEndpointError(successfulResult.body);
       successPollsPerformed = s + 1;
 
       if (selectedInvoice && (extractReferenceNumber(selectedInvoice) || extractKsefNumber(selectedInvoice))) {
