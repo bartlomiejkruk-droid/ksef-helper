@@ -10,11 +10,13 @@ const KSEF_BASE_URL = process.env.KSEF_BASE_URL || "https://api-demo.ksef.mf.gov
 const PORT = process.env.PORT || 3000;
 
 /**
- * Ścieżki KSeF
+ * KSeF endpoints
+ * Status faktury w sesji:
+ * GET /sessions/{referenceNumber}/invoices/{invoiceReferenceNumber}
+ * UPO:
+ * GET /sessions/{referenceNumber}/invoices/{invoiceReferenceNumber}/upo
+ * GET /sessions/{referenceNumber}/invoices/ksef/{ksefNumber}/upo
  */
-const SUCCESSFUL_INVOICES_PATH = (sessionReferenceNumber) =>
-  `${KSEF_BASE_URL}/v2/sessions/${sessionReferenceNumber}/invoices/successful`;
-
 const FAILED_INVOICES_PATH = (sessionReferenceNumber) =>
   `${KSEF_BASE_URL}/v2/sessions/${sessionReferenceNumber}/invoices/failed`;
 
@@ -24,8 +26,14 @@ const SESSION_STATUS_PATH = (sessionReferenceNumber) =>
 const SEND_INVOICE_PATH = (sessionReferenceNumber) =>
   `${KSEF_BASE_URL}/v2/sessions/online/${sessionReferenceNumber}/invoices`;
 
-const UPO_PATH = (sessionReferenceNumber, referenceNumber) =>
-  `${KSEF_BASE_URL}/v2/sessions/${sessionReferenceNumber}/invoices/${referenceNumber}/upo`;
+const INVOICE_STATUS_PATH = (sessionReferenceNumber, invoiceReferenceNumber) =>
+  `${KSEF_BASE_URL}/v2/sessions/${sessionReferenceNumber}/invoices/${encodeURIComponent(invoiceReferenceNumber)}`;
+
+const UPO_BY_REFERENCE_PATH = (sessionReferenceNumber, invoiceReferenceNumber) =>
+  `${KSEF_BASE_URL}/v2/sessions/${sessionReferenceNumber}/invoices/${encodeURIComponent(invoiceReferenceNumber)}/upo`;
+
+const UPO_BY_KSEF_PATH = (sessionReferenceNumber, ksefNumber) =>
+  `${KSEF_BASE_URL}/v2/sessions/${sessionReferenceNumber}/invoices/ksef/${encodeURIComponent(ksefNumber)}/upo`;
 
 const CLOSE_SESSION_PATH = (sessionReferenceNumber) =>
   `${KSEF_BASE_URL}/v2/sessions/online/${sessionReferenceNumber}/close`;
@@ -44,24 +52,6 @@ function safeParseBody(req) {
   }
 
   throw new Error("Nie udało się odczytać request body");
-}
-
-function extractInvoiceReferenceNumberFromSendResponse(anyBody) {
-  const source =
-    anyBody?.ksefResponse ||
-    anyBody?.response ||
-    anyBody?.data ||
-    anyBody ||
-    {};
-
-  return (
-    source?.referenceNumber ||
-    source?.invoiceReferenceNumber ||
-    source?.elementReferenceNumber ||
-    source?.invoice?.referenceNumber ||
-    source?.invoice?.invoiceReferenceNumber ||
-    ""
-  );
 }
 
 function requireString(obj, key) {
@@ -163,16 +153,14 @@ function encryptXml(xmlText, aesKeyBase64, initializationVector) {
     cipher.final()
   ]);
 
-  const encryptedBuffer = cipherText;
-
   return {
     xmlBuffer,
-    encryptedBuffer,
+    encryptedBuffer: cipherText,
     invoiceHash: sha256Base64(xmlBuffer),
     invoiceSize: xmlBuffer.length,
-    encryptedInvoiceHash: sha256Base64(encryptedBuffer),
-    encryptedInvoiceSize: encryptedBuffer.length,
-    encryptedInvoiceContent: encryptedBuffer.toString("base64")
+    encryptedInvoiceHash: sha256Base64(cipherText),
+    encryptedInvoiceSize: cipherText.length,
+    encryptedInvoiceContent: cipherText.toString("base64")
   };
 }
 
@@ -241,93 +229,17 @@ function extractSessionSummary(sessionBody) {
   };
 }
 
-function collectArraysDeep(node, found = []) {
-  if (Array.isArray(node)) {
-    found.push(node);
-    for (const item of node) {
-      collectArraysDeep(item, found);
-    }
-    return found;
-  }
+function extractInvoiceReferenceNumberFromSendResponse(anyBody) {
+  const source = anyBody?.ksefResponse || anyBody?.response || anyBody?.data || anyBody || {};
 
-  if (node && typeof node === "object") {
-    for (const value of Object.values(node)) {
-      collectArraysDeep(value, found);
-    }
-  }
-
-  return found;
-}
-
-function looksLikeInvoiceObject(obj) {
-  if (!obj || typeof obj !== "object" || Array.isArray(obj)) {
-    return false;
-  }
-
-  const possibleKeys = [
-    "referenceNumber",
-    "referenceNo",
-    "invoiceReferenceNumber",
-    "ksefNumber",
-    "ksefReferenceNumber",
-    "ksefReferenceNo",
-    "invoiceKsefNumber",
-    "invoiceNumber",
-    "invoiceStatus",
-    "acquisitionTimestamp",
-    "dateAcquired",
-    "dateAdded",
-    "ordinalNumber"
-  ];
-
-  return possibleKeys.some(key => Object.prototype.hasOwnProperty.call(obj, key));
-}
-
-function extractInvoiceList(anyBody) {
-  const source =
-    anyBody?.ksefResponse ||
-    anyBody?.response ||
-    anyBody?.data ||
-    anyBody ||
-    {};
-
-  const directCandidates = [
-    source?.invoices,
-    source?.items,
-    source?.data,
-    source?.successfulInvoices,
-    source?.invoiceList,
-    source?.invoiceHeaderList,
-    source?.successfulInvoiceList,
-    source?.results,
-    source?.content
-  ];
-
-  for (const candidate of directCandidates) {
-    if (Array.isArray(candidate)) {
-      const filtered = candidate.filter(looksLikeInvoiceObject);
-      if (filtered.length > 0) {
-        return filtered;
-      }
-      if (candidate.length > 0) {
-        return candidate;
-      }
-    }
-  }
-
-  const deepArrays = collectArraysDeep(source, []);
-  for (const arr of deepArrays) {
-    const filtered = arr.filter(looksLikeInvoiceObject);
-    if (filtered.length > 0) {
-      return filtered;
-    }
-  }
-
-  if (Array.isArray(source)) {
-    return source;
-  }
-
-  return [];
+  return (
+    source?.invoiceReferenceNumber ||
+    source?.referenceNumber ||
+    source?.elementReferenceNumber ||
+    source?.invoice?.invoiceReferenceNumber ||
+    source?.invoice?.referenceNumber ||
+    ""
+  );
 }
 
 function extractReferenceNumber(invoiceObj) {
@@ -336,13 +248,12 @@ function extractReferenceNumber(invoiceObj) {
   }
 
   return (
+    invoiceObj.invoiceReferenceNumber ||
     invoiceObj.referenceNumber ||
     invoiceObj.referenceNo ||
-    invoiceObj.invoiceReferenceNumber ||
-    invoiceObj?.metadata?.referenceNumber ||
-    invoiceObj?.invoiceMetadata?.referenceNumber ||
-    invoiceObj?.invoice?.referenceNumber ||
-    invoiceObj?.invoiceReference?.referenceNumber ||
+    invoiceObj.invoice?.invoiceReferenceNumber ||
+    invoiceObj.invoice?.referenceNumber ||
+    invoiceObj.metadata?.referenceNumber ||
     ""
   );
 }
@@ -354,11 +265,9 @@ function extractKsefNumber(invoiceObj) {
 
   return (
     invoiceObj.ksefNumber ||
-    invoiceObj.ksefReferenceNumber ||
-    invoiceObj.ksefReferenceNo ||
     invoiceObj.invoiceKsefNumber ||
-    invoiceObj?.invoice?.ksefNumber ||
-    invoiceObj?.invoiceKsef?.number ||
+    invoiceObj.invoice?.ksefNumber ||
+    invoiceObj.ksef?.number ||
     ""
   );
 }
@@ -378,7 +287,7 @@ function extractInvoiceStatus(invoiceObj) {
     statusObj?.code ||
     statusObj?.description ||
     invoiceObj.invoiceStatus ||
-    invoiceObj?.invoice?.status ||
+    invoiceObj.processingStatus ||
     ""
   );
 }
@@ -397,60 +306,13 @@ function extractAcquisitionTimestamp(invoiceObj) {
   );
 }
 
-function pickBestInvoice(invoices) {
-  if (!Array.isArray(invoices) || invoices.length === 0) {
-    return null;
-  }
-
-  const scored = invoices.map(inv => {
-    let score = 0;
-
-    if (extractReferenceNumber(inv)) score += 2;
-    if (extractKsefNumber(inv)) score += 5;
-    if (extractInvoiceStatus(inv)) score += 1;
-    if (extractAcquisitionTimestamp(inv)) score += 1;
-
-    return { inv, score };
-  });
-
-  scored.sort((a, b) => b.score - a.score);
-
-  return scored[0]?.inv || invoices[0];
-}
-
-function buildXmlFileName(referenceNumber) {
-  const safe = String(referenceNumber || "UPO").replace(/[^a-zA-Z0-9._-]/g, "_");
-  return `${safe}.xml`;
-}
-
-function buildPdfFileName(referenceNumber) {
-  const safe = String(referenceNumber || "UPO").replace(/[^a-zA-Z0-9._-]/g, "_");
-  return `${safe}.pdf`;
-}
-
 function extractFailedInvoices(anyBody) {
   const source = anyBody?.ksefResponse || anyBody?.response || anyBody || {};
 
-  if (Array.isArray(source?.invoices)) {
-    return source.invoices;
-  }
-  if (Array.isArray(source?.items)) {
-    return source.items;
-  }
-  if (Array.isArray(source?.data)) {
-    return source.data;
-  }
-  if (Array.isArray(source)) {
-    return source;
-  }
-
-  const deepArrays = collectArraysDeep(source, []);
-  for (const arr of deepArrays) {
-    const hasFailedLikeObjects = arr.some(item => item && typeof item === "object" && (item.status || item.referenceNumber || item.invoiceNumber));
-    if (hasFailedLikeObjects) {
-      return arr;
-    }
-  }
+  if (Array.isArray(source?.invoices)) return source.invoices;
+  if (Array.isArray(source?.items)) return source.items;
+  if (Array.isArray(source?.data)) return source.data;
+  if (Array.isArray(source)) return source;
 
   return [];
 }
@@ -500,32 +362,17 @@ function extractDuplicateInfoFromFailedResponse(failedBody) {
   };
 }
 
-function extractSuccessfulEndpointError(successfulBody) {
-  const source = successfulBody?.ksefResponse || successfulBody?.response || successfulBody || {};
+function extractSuccessfulEndpointError(anyBody) {
+  const source = anyBody?.ksefResponse || anyBody?.response || anyBody || {};
+  const exception = source?.exception || {};
 
-  const exceptionCode =
-    source?.exceptionCode ||
-    source?.exception?.code ||
-    source?.error?.code ||
-    "";
-
-  const exceptionDescription =
-    source?.exceptionDescription ||
-    source?.exception?.description ||
-    source?.error?.description ||
-    source?.message ||
-    "";
-
-  let details = [];
-
-  if (Array.isArray(source?.exceptionDetailList)) {
-    details = source.exceptionDetailList;
-  } else if (Array.isArray(source?.details)) {
-    details = source.details;
-  }
+  const details = Array.isArray(exception?.exceptionDetailList)
+    ? exception.exceptionDetailList
+    : Array.isArray(source?.exceptionDetailList)
+      ? source.exceptionDetailList
+      : [];
 
   let flattenedMessages = [];
-
   for (const item of details) {
     if (Array.isArray(item?.details)) {
       flattenedMessages = flattenedMessages.concat(item.details.map(x => String(x)));
@@ -539,48 +386,35 @@ function extractSuccessfulEndpointError(successfulBody) {
   }
 
   const joined = flattenedMessages.join(" | ").toLowerCase();
-  const formatError =
-    joined.includes("invoicereferencenumber is not in the correct format") ||
-    joined.includes("reference number is not in the correct format");
 
   return {
-    hasError: Boolean(exceptionCode || exceptionDescription || details.length > 0),
-    exceptionCode: exceptionCode ? String(exceptionCode) : "",
-    exceptionDescription: String(exceptionDescription || ""),
+    hasError: Boolean(details.length > 0 || exception?.exceptionDescription),
+    exceptionCode: String(details?.[0]?.exceptionCode || exception?.exceptionCode || ""),
+    exceptionDescription: String(details?.[0]?.exceptionDescription || exception?.exceptionDescription || ""),
     exceptionDetailList: details,
     flattenedMessages,
-    isReferenceFormatError: formatError
+    isReferenceFormatError:
+      joined.includes("invoicereferencenumber") &&
+      joined.includes("not in the correct format")
   };
 }
 
 async function getSessionStatus(accessToken, sessionReferenceNumber) {
   const endpoint = SESSION_STATUS_PATH(sessionReferenceNumber);
   const result = await callKsef(endpoint, accessToken);
-
-  return {
-    endpoint,
-    ...result
-  };
+  return { endpoint, ...result };
 }
 
 async function getSessionFailed(accessToken, sessionReferenceNumber) {
   const endpoint = FAILED_INVOICES_PATH(sessionReferenceNumber);
   const result = await callKsef(endpoint, accessToken);
-
-  return {
-    endpoint,
-    ...result
-  };
+  return { endpoint, ...result };
 }
 
-async function getSessionSuccessful(accessToken, sessionReferenceNumber) {
-  const endpoint = SUCCESSFUL_INVOICES_PATH(sessionReferenceNumber);
+async function getInvoiceStatus(accessToken, sessionReferenceNumber, invoiceReferenceNumber) {
+  const endpoint = INVOICE_STATUS_PATH(sessionReferenceNumber, invoiceReferenceNumber);
   const result = await callKsef(endpoint, accessToken);
-
-  return {
-    endpoint,
-    ...result
-  };
+  return { endpoint, ...result };
 }
 
 async function closeSession(accessToken, sessionReferenceNumber) {
@@ -589,22 +423,26 @@ async function closeSession(accessToken, sessionReferenceNumber) {
     method: "POST",
     body: JSON.stringify({})
   });
-
-  return {
-    endpoint,
-    ...result
-  };
+  return { endpoint, ...result };
 }
 
-async function getInvoiceUpo(accessToken, sessionReferenceNumber, referenceNumber, prefer = "xml") {
-  const endpoint = UPO_PATH(sessionReferenceNumber, referenceNumber);
+async function getInvoiceUpo(accessToken, sessionReferenceNumber, options = {}) {
+  const invoiceReferenceNumber = options.invoiceReferenceNumber || "";
+  const ksefNumber = options.ksefNumber || "";
+  const prefer = options.prefer || "xml";
+
+  let endpoint = "";
+  if (invoiceReferenceNumber) {
+    endpoint = UPO_BY_REFERENCE_PATH(sessionReferenceNumber, invoiceReferenceNumber);
+  } else if (ksefNumber) {
+    endpoint = UPO_BY_KSEF_PATH(sessionReferenceNumber, ksefNumber);
+  } else {
+    throw new Error("Brak invoiceReferenceNumber lub ksefNumber do pobrania UPO");
+  }
 
   let accept = "application/xml";
-  if (prefer === "pdf") {
-    accept = "application/pdf";
-  } else if (prefer === "json") {
-    accept = "application/json";
-  }
+  if (prefer === "pdf") accept = "application/pdf";
+  if (prefer === "json") accept = "application/json";
 
   const result = await callKsef(endpoint, accessToken, {
     method: "GET",
@@ -625,7 +463,7 @@ async function getInvoiceUpo(accessToken, sessionReferenceNumber, referenceNumbe
       : isXml
         ? "application/xml"
         : result.contentType || "application/octet-stream",
-    upoFileName: isPdf ? buildPdfFileName(`UPO_${referenceNumber}`) : buildXmlFileName(`UPO_${referenceNumber}`),
+    upoFileName: isPdf ? "UPO.pdf" : "UPO.xml",
     upoText: isPdf ? "" : result.raw,
     upoBase64: Buffer.from(result.raw || "", isPdf ? "binary" : "utf8").toString("base64")
   };
@@ -737,35 +575,25 @@ app.post("/send-invoice", async (req, res) => {
     const rawBody = JSON.stringify(payload);
     const endpoint = SEND_INVOICE_PATH(sessionReferenceNumber);
 
-    console.log("=== KSEF SEND DEBUG ===");
-    console.log("endpoint:", endpoint);
-    console.log("xmlCharLength:", xmlText.length);
-    console.log("xmlByteLength:", encrypted.xmlBuffer.length);
-    console.log("invoiceHash:", payload.invoiceHash);
-    console.log("invoiceSize:", payload.invoiceSize);
-    console.log("encryptedInvoiceHash:", payload.encryptedInvoiceHash);
-    console.log("encryptedInvoiceSize:", payload.encryptedInvoiceSize);
-    console.log("rawRequestBodyLength:", Buffer.byteLength(rawBody, "utf8"));
-    console.log("rawRequestBody:", rawBody);
-
     const result = await callKsef(endpoint, accessToken, {
       method: "POST",
       body: rawBody
     });
-const invoiceReferenceNumber = extractInvoiceReferenceNumberFromSendResponse(result.body);
 
-return res.status(result.status).json({
-  baseUrl: KSEF_BASE_URL,
-  endpoint,
-  xmlCharLength: xmlText.length,
-  xmlByteLength: encrypted.xmlBuffer.length,
-  requestPayload: payload,
-  rawRequestBody: rawBody,
-  rawRequestBodyLength: Buffer.byteLength(rawBody, "utf8"),
-  ksefStatus: result.status,
-  invoiceReferenceNumber,
-  ksefResponse: result.body
-});
+    const invoiceReferenceNumber = extractInvoiceReferenceNumberFromSendResponse(result.body);
+
+    return res.status(result.status).json({
+      baseUrl: KSEF_BASE_URL,
+      endpoint,
+      xmlCharLength: xmlText.length,
+      xmlByteLength: encrypted.xmlBuffer.length,
+      requestPayload: payload,
+      rawRequestBody: rawBody,
+      rawRequestBodyLength: Buffer.byteLength(rawBody, "utf8"),
+      ksefStatus: result.status,
+      invoiceReferenceNumber,
+      ksefResponse: result.body
+    });
   } catch (e) {
     console.error("POST /send-invoice error:", e);
     return res.status(500).json({ error: e.message });
@@ -794,20 +622,19 @@ app.post("/send-invoice-raw", async (req, res) => {
       method: "POST",
       body: rawBody
     });
-const invoiceReferenceNumber = extractInvoiceReferenceNumberFromSendResponse(result.body);
 
-return res.status(result.status).json({
-  baseUrl: KSEF_BASE_URL,
-  endpoint,
-  xmlCharLength: xmlText.length,
-  xmlByteLength: encrypted.xmlBuffer.length,
-  requestPayload: payload,
-  rawRequestBody: rawBody,
-  rawRequestBodyLength: Buffer.byteLength(rawBody, "utf8"),
-  ksefStatus: result.status,
-  invoiceReferenceNumber,
-  ksefResponse: result.body
-});
+    const invoiceReferenceNumber = extractInvoiceReferenceNumberFromSendResponse(result.body);
+
+    return res.status(result.status).json({
+      baseUrl: KSEF_BASE_URL,
+      endpoint,
+      requestPayload: payload,
+      rawRequestBody: rawBody,
+      rawRequestBodyLength: Buffer.byteLength(rawBody, "utf8"),
+      ksefStatus: result.status,
+      invoiceReferenceNumber,
+      ksefResponse: result.body
+    });
   } catch (e) {
     console.error("POST /send-invoice-raw error:", e);
     return res.status(500).json({ error: e.message });
@@ -865,34 +692,35 @@ app.post("/session-failed", async (req, res) => {
   }
 });
 
-app.post("/session-successful", async (req, res) => {
+app.post("/invoice-status", async (req, res) => {
   try {
     const body = safeParseBody(req);
 
     const accessToken = requireString(body, "accessToken");
     const sessionReferenceNumber = requireString(body, "sessionReferenceNumber");
+    const invoiceReferenceNumber = requireString(body, "invoiceReferenceNumber");
 
-    const result = await getSessionSuccessful(accessToken, sessionReferenceNumber);
-    const invoices = extractInvoiceList(result.body);
-    const selectedInvoice = pickBestInvoice(invoices);
-    const referenceNumber = extractReferenceNumber(selectedInvoice);
-    const ksefNumber = extractKsefNumber(selectedInvoice);
-    const successfulError = extractSuccessfulEndpointError(result.body);
+    const result = await getInvoiceStatus(accessToken, sessionReferenceNumber, invoiceReferenceNumber);
+
+    const invoiceObj =
+      result.body?.invoice ||
+      result.body?.ksefResponse?.invoice ||
+      result.body?.response?.invoice ||
+      result.body;
 
     return res.status(result.status).json({
       baseUrl: KSEF_BASE_URL,
       endpoint: result.endpoint,
       ksefStatus: result.status,
-      invoiceCountParsed: invoices.length,
-      selectedReferenceNumber: referenceNumber,
-      selectedKsefNumber: ksefNumber,
-      selectedInvoice,
-      successfulInvoicesParsed: invoices,
-      successfulEndpointError: successfulError,
+      invoiceReferenceNumber: extractReferenceNumber(invoiceObj) || invoiceReferenceNumber,
+      ksefNumber: extractKsefNumber(invoiceObj),
+      invoiceStatus: extractInvoiceStatus(invoiceObj),
+      acquisitionTimestamp: extractAcquisitionTimestamp(invoiceObj),
+      invoice: invoiceObj,
       ksefResponse: result.body
     });
   } catch (e) {
-    console.error("POST /session-successful error:", e);
+    console.error("POST /invoice-status error:", e);
     return res.status(500).json({ error: e.message });
   }
 });
@@ -903,10 +731,15 @@ app.post("/invoice-upo", async (req, res) => {
 
     const accessToken = requireString(body, "accessToken");
     const sessionReferenceNumber = requireString(body, "sessionReferenceNumber");
-    const referenceNumber = requireString(body, "referenceNumber");
+    const invoiceReferenceNumber = optionalString(body, "invoiceReferenceNumber", "");
+    const ksefNumber = optionalString(body, "ksefNumber", "");
     const prefer = optionalString(body, "prefer", "xml");
 
-    const result = await getInvoiceUpo(accessToken, sessionReferenceNumber, referenceNumber, prefer);
+    const result = await getInvoiceUpo(accessToken, sessionReferenceNumber, {
+      invoiceReferenceNumber,
+      ksefNumber,
+      prefer
+    });
 
     return res.status(result.status).json({
       baseUrl: KSEF_BASE_URL,
@@ -946,87 +779,26 @@ app.post("/session-close", async (req, res) => {
   }
 });
 
-app.post("/session-debug", async (req, res) => {
-  try {
-    const body = safeParseBody(req);
-
-    const accessToken = requireString(body, "accessToken");
-    const sessionReferenceNumber = requireString(body, "sessionReferenceNumber");
-
-    const statusEndpoint = SESSION_STATUS_PATH(sessionReferenceNumber);
-    const failedEndpoint = FAILED_INVOICES_PATH(sessionReferenceNumber);
-    const successfulEndpoint = SUCCESSFUL_INVOICES_PATH(sessionReferenceNumber);
-
-    const [statusResult, failedResult, successfulResult] = await Promise.all([
-      callKsef(statusEndpoint, accessToken),
-      callKsef(failedEndpoint, accessToken),
-      callKsef(successfulEndpoint, accessToken)
-    ]);
-
-    const successfulInvoices = extractInvoiceList(successfulResult.body);
-    const selectedInvoice = pickBestInvoice(successfulInvoices);
-    const duplicateInfo = extractDuplicateInfoFromFailedResponse(failedResult.body);
-    const successfulError = extractSuccessfulEndpointError(successfulResult.body);
-
-    return res.json({
-      baseUrl: KSEF_BASE_URL,
-      sessionReferenceNumber,
-      status: {
-        endpoint: statusEndpoint,
-        httpStatus: statusResult.status,
-        response: statusResult.body
-      },
-      failed: {
-        endpoint: failedEndpoint,
-        httpStatus: failedResult.status,
-        isDuplicate: duplicateInfo.isDuplicate,
-        duplicateStatusCode: duplicateInfo.duplicateStatusCode,
-        duplicateStatusDescription: duplicateInfo.duplicateStatusDescription,
-        originalKsefNumber: duplicateInfo.originalKsefNumber,
-        originalSessionReferenceNumber: duplicateInfo.originalSessionReferenceNumber,
-        originalInvoiceNumber: duplicateInfo.originalInvoiceNumber,
-        originalReferenceNumber: duplicateInfo.originalReferenceNumber,
-        duplicateFailedInvoice: duplicateInfo.duplicateFailedInvoice,
-        response: failedResult.body
-      },
-      successful: {
-        endpoint: successfulEndpoint,
-        httpStatus: successfulResult.status,
-        parsedInvoiceCount: successfulInvoices.length,
-        selectedReferenceNumber: extractReferenceNumber(selectedInvoice),
-        selectedKsefNumber: extractKsefNumber(selectedInvoice),
-        selectedInvoice,
-        successfulInvoicesParsed: successfulInvoices,
-        successfulEndpointError: successfulError,
-        response: successfulResult.body
-      }
-    });
-  } catch (e) {
-    console.error("POST /session-debug error:", e);
-    return res.status(500).json({ error: e.message });
-  }
-});
-
 app.post("/finalize-session", async (req, res) => {
   try {
     const body = safeParseBody(req);
 
     const accessToken = requireString(body, "accessToken");
     const sessionReferenceNumber = requireString(body, "sessionReferenceNumber");
+    const invoiceReferenceNumber = requireString(body, "invoiceReferenceNumber");
     const closeAfter = optionalBoolean(body, "closeAfter", true);
-    const pollCount = optionalNumber(body, "pollCount", 10);
-    const pollDelayMs = optionalNumber(body, "pollDelayMs", 1500);
+    const pollCount = optionalNumber(body, "pollCount", 5);
+    const pollDelayMs = optionalNumber(body, "pollDelayMs", 1000);
     const preferUpo = optionalString(body, "preferUpo", "xml");
 
     let statusResult = null;
     let summary = null;
-    let i = 0;
 
-    for (i = 0; i < pollCount; i++) {
+    for (let i = 0; i < pollCount; i++) {
       statusResult = await getSessionStatus(accessToken, sessionReferenceNumber);
       summary = extractSessionSummary(statusResult.body);
 
-      if (summary.failedInvoiceCount > 0 || summary.successfulInvoiceCount > 0) {
+      if (summary.failedInvoiceCount > 0 || summary.successfulInvoiceCount > 0 || summary.invoiceCount > 0) {
         break;
       }
 
@@ -1048,85 +820,24 @@ app.post("/finalize-session", async (req, res) => {
         closeResult = await closeSession(accessToken, sessionReferenceNumber);
       }
 
-      if (duplicateInfo.isDuplicate && duplicateInfo.originalKsefNumber) {
-        let upoResult = null;
-        let upoReady = false;
-
-        if (duplicateInfo.originalReferenceNumber) {
-          try {
-            upoResult = await getInvoiceUpo(
-              accessToken,
-              duplicateInfo.originalSessionReferenceNumber || sessionReferenceNumber,
-              duplicateInfo.originalReferenceNumber,
-              preferUpo
-            );
-
-            if (upoResult && upoResult.status >= 200 && upoResult.status < 300) {
-              upoReady = true;
-            }
-          } catch (upoErr) {
-            console.error("UPO duplicate fetch error:", upoErr);
-          }
-        }
-
-        return res.status(200).json({
-          ok: true,
-          processed: true,
-          accepted: true,
-          isDuplicate: true,
-          sessionReferenceNumber,
-          sessionStatusCode: summary.statusCode,
-          sessionStatusDescription: summary.statusDescription,
-          invoiceCount: summary.invoiceCount,
-          successfulInvoiceCount: summary.successfulInvoiceCount,
-          failedInvoiceCount: summary.failedInvoiceCount,
-          duplicateStatusCode: duplicateInfo.duplicateStatusCode,
-          duplicateStatusDescription: duplicateInfo.duplicateStatusDescription,
-          referenceNumber: duplicateInfo.originalReferenceNumber || "",
-          ksefNumber: duplicateInfo.originalKsefNumber,
-          originalKsefNumber: duplicateInfo.originalKsefNumber,
-          originalSessionReferenceNumber: duplicateInfo.originalSessionReferenceNumber,
-          originalInvoiceNumber: duplicateInfo.originalInvoiceNumber,
-          duplicateFailedInvoice: duplicateInfo.duplicateFailedInvoice,
-          failedEndpoint: failedResult.endpoint,
-          failedResponse: failedResult.body,
-          upoReady,
-          upo: upoResult
-            ? {
-                endpoint: upoResult.endpoint,
-                httpStatus: upoResult.status,
-                contentType: upoResult.contentType,
-                upoMimeType: upoResult.upoMimeType,
-                upoFileName: upoResult.upoFileName,
-                upoText: upoResult.upoText,
-                upoBase64: upoResult.upoBase64,
-                response: upoResult.body
-              }
-            : null,
-          closeAttempted: closeAfter,
-          closeResponse: closeResult
-            ? {
-                endpoint: closeResult.endpoint,
-                httpStatus: closeResult.status,
-                response: closeResult.body
-              }
-            : null,
-          message: "Faktura już wcześniej istnieje w KSeF (duplikat)"
-        });
-      }
-
       return res.status(200).json({
-        ok: false,
+        ok: duplicateInfo.isDuplicate,
         processed: true,
         accepted: false,
-        isDuplicate: false,
+        isDuplicate: duplicateInfo.isDuplicate,
         sessionReferenceNumber,
+        invoiceReferenceNumber,
         sessionStatusCode: summary.statusCode,
         sessionStatusDescription: summary.statusDescription,
         invoiceCount: summary.invoiceCount,
         successfulInvoiceCount: summary.successfulInvoiceCount,
         failedInvoiceCount: summary.failedInvoiceCount,
-        failedEndpoint: failedResult.endpoint,
+        duplicateStatusCode: duplicateInfo.duplicateStatusCode,
+        duplicateStatusDescription: duplicateInfo.duplicateStatusDescription,
+        originalKsefNumber: duplicateInfo.originalKsefNumber,
+        originalSessionReferenceNumber: duplicateInfo.originalSessionReferenceNumber,
+        originalInvoiceNumber: duplicateInfo.originalInvoiceNumber,
+        originalReferenceNumber: duplicateInfo.originalReferenceNumber,
         failedResponse: failedResult.body,
         closeAttempted: closeAfter,
         closeResponse: closeResult
@@ -1136,106 +847,64 @@ app.post("/finalize-session", async (req, res) => {
               response: closeResult.body
             }
           : null,
-        message: "Sesja zawiera błędne faktury"
+        message: duplicateInfo.isDuplicate
+          ? "Faktura już wcześniej istnieje w KSeF (duplikat)"
+          : "Sesja zawiera błędne faktury"
       });
     }
 
-    if (summary.successfulInvoiceCount < 1) {
-      return res.status(200).json({
-        ok: true,
-        processed: false,
-        accepted: false,
+    let invoiceStatusResult = null;
+    let invoiceObj = null;
+
+    for (let i = 0; i < pollCount; i++) {
+      invoiceStatusResult = await getInvoiceStatus(
+        accessToken,
         sessionReferenceNumber,
-        sessionStatusCode: summary.statusCode,
-        sessionStatusDescription: summary.statusDescription,
-        invoiceCount: summary.invoiceCount,
-        successfulInvoiceCount: summary.successfulInvoiceCount,
-        failedInvoiceCount: summary.failedInvoiceCount,
-        pollsPerformed: i + 1,
-        message: "Faktura jeszcze nie jest przetworzona końcowo"
-      });
-    }
+        invoiceReferenceNumber
+      );
 
-    let successfulResult = null;
-    let invoices = [];
-    let selectedInvoice = null;
-    let successPollsPerformed = 0;
-    let successfulError = null;
+      const bodyObj = invoiceStatusResult.body;
 
-    for (let s = 0; s < pollCount; s++) {
-      successfulResult = await getSessionSuccessful(accessToken, sessionReferenceNumber);
-      invoices = extractInvoiceList(successfulResult.body);
-      selectedInvoice = pickBestInvoice(invoices);
-      successfulError = extractSuccessfulEndpointError(successfulResult.body);
-      successPollsPerformed = s + 1;
+      if (invoiceStatusResult.ok) {
+        invoiceObj =
+          bodyObj?.invoice ||
+          bodyObj?.ksefResponse?.invoice ||
+          bodyObj?.response?.invoice ||
+          bodyObj;
+      }
 
-      if (selectedInvoice && (extractReferenceNumber(selectedInvoice) || extractKsefNumber(selectedInvoice))) {
+      const ksefNumber = extractKsefNumber(invoiceObj);
+      if (ksefNumber) {
         break;
       }
 
-      if (successfulError?.isReferenceFormatError) {
-        break;
-      }
-
-      if (s < pollCount - 1) {
+      if (i < pollCount - 1) {
         await sleep(pollDelayMs);
       }
     }
-
-    console.log("SUCCESSFUL RAW:", JSON.stringify(successfulResult?.body, null, 2));
-    console.log("SUCCESSFUL PARSED COUNT:", invoices.length);
-    console.log("SUCCESSFUL SELECTED INVOICE:", selectedInvoice);
-    console.log("SUCCESSFUL ERROR:", successfulError);
 
     let closeResult = null;
     if (closeAfter) {
       closeResult = await closeSession(accessToken, sessionReferenceNumber);
     }
 
-    if (!selectedInvoice) {
-      if (summary.successfulInvoiceCount > 0 && successfulError?.hasError) {
-        return res.status(200).json({
-          ok: true,
-          processed: true,
-          accepted: false,
-          isDuplicate: false,
-          needsManualKsefNumberFetch: true,
-          sessionReferenceNumber,
-          sessionStatusCode: summary.statusCode,
-          sessionStatusDescription: summary.statusDescription,
-          invoiceCount: summary.invoiceCount,
-          successfulInvoiceCount: summary.successfulInvoiceCount,
-          failedInvoiceCount: summary.failedInvoiceCount,
-          successfulEndpoint: successfulResult?.endpoint || "",
-          successfulResponse: successfulResult?.body || null,
-          successfulEndpointError: successfulError,
-          successfulInvoicesParsed: invoices,
-          successPollsPerformed,
-          closeAttempted: closeAfter,
-          closeResponse: closeResult
-            ? {
-                endpoint: closeResult.endpoint,
-                httpStatus: closeResult.status,
-                response: closeResult.body
-              }
-            : null,
-          message: "Faktura przetworzona, ale nie udało się odczytać numeru KSeF z endpointu successful"
-        });
-      }
-
+    if (!invoiceStatusResult || !invoiceStatusResult.ok) {
       return res.status(200).json({
         ok: false,
         processed: true,
         accepted: false,
         isDuplicate: false,
         sessionReferenceNumber,
+        invoiceReferenceNumber,
         sessionStatusCode: summary.statusCode,
         sessionStatusDescription: summary.statusDescription,
-        successfulEndpoint: successfulResult?.endpoint || "",
-        successfulResponse: successfulResult?.body || null,
-        successfulEndpointError: successfulError,
-        successfulInvoicesParsed: invoices,
-        successPollsPerformed,
+        invoiceCount: summary.invoiceCount,
+        successfulInvoiceCount: summary.successfulInvoiceCount,
+        failedInvoiceCount: summary.failedInvoiceCount,
+        invoiceStatusEndpoint: invoiceStatusResult?.endpoint || "",
+        invoiceStatusHttpStatus: invoiceStatusResult?.status || 0,
+        invoiceStatusResponse: invoiceStatusResult?.body || null,
+        invoiceStatusError: extractSuccessfulEndpointError(invoiceStatusResult?.body || {}),
         closeAttempted: closeAfter,
         closeResponse: closeResult
           ? {
@@ -1244,60 +913,52 @@ app.post("/finalize-session", async (req, res) => {
               response: closeResult.body
             }
           : null,
-        message: "Nie udało się odczytać danych poprawnej faktury z endpointu successful"
+        message: "Nie udało się pobrać statusu faktury z sesji"
       });
     }
 
-    const referenceNumber = extractReferenceNumber(selectedInvoice);
-    const ksefNumber = extractKsefNumber(selectedInvoice);
-    const invoiceStatus = extractInvoiceStatus(selectedInvoice);
-    const acquisitionTimestamp = extractAcquisitionTimestamp(selectedInvoice);
-
-    console.log("REFERENCE NUMBER:", referenceNumber);
-    console.log("KSEF NUMBER:", ksefNumber);
+    const referenceNumber = extractReferenceNumber(invoiceObj) || invoiceReferenceNumber;
+    const ksefNumber = extractKsefNumber(invoiceObj);
+    const invoiceStatus = extractInvoiceStatus(invoiceObj);
+    const acquisitionTimestamp = extractAcquisitionTimestamp(invoiceObj);
 
     let upoResult = null;
     let upoReady = false;
 
-    if (referenceNumber) {
+    if (ksefNumber || referenceNumber) {
       try {
-        upoResult = await getInvoiceUpo(
-          accessToken,
-          sessionReferenceNumber,
-          referenceNumber,
-          preferUpo
-        );
+        upoResult = await getInvoiceUpo(accessToken, sessionReferenceNumber, {
+          invoiceReferenceNumber: referenceNumber,
+          ksefNumber,
+          prefer: preferUpo
+        });
 
         if (upoResult && upoResult.status >= 200 && upoResult.status < 300) {
           upoReady = true;
         }
-      } catch (upoErr) {
-        console.error("UPO fetch error:", upoErr);
+      } catch (e) {
+        console.error("UPO fetch error:", e);
       }
     }
 
     return res.status(200).json({
       ok: true,
-      processed: true,
-      accepted: true,
+      processed: Boolean(ksefNumber),
+      accepted: Boolean(ksefNumber),
       isDuplicate: false,
-      needsManualKsefNumberFetch: false,
       sessionReferenceNumber,
+      invoiceReferenceNumber: referenceNumber,
+      ksefNumber,
+      invoiceStatus,
+      acquisitionTimestamp,
       sessionStatusCode: summary.statusCode,
       sessionStatusDescription: summary.statusDescription,
       invoiceCount: summary.invoiceCount,
       successfulInvoiceCount: summary.successfulInvoiceCount,
       failedInvoiceCount: summary.failedInvoiceCount,
-      referenceNumber,
-      ksefNumber,
-      invoiceStatus,
-      acquisitionTimestamp,
-      selectedReferenceNumber: referenceNumber,
-      selectedKsefNumber: ksefNumber,
-      selectedInvoice,
-      successfulInvoicesParsed: invoices,
-      successfulEndpointError: successfulError,
-      successPollsPerformed,
+      invoiceStatusEndpoint: invoiceStatusResult.endpoint,
+      invoiceStatusHttpStatus: invoiceStatusResult.status,
+      selectedInvoice: invoiceObj,
       upoReady,
       upo: upoResult
         ? {
@@ -1318,8 +979,10 @@ app.post("/finalize-session", async (req, res) => {
             httpStatus: closeResult.status,
             response: closeResult.body
           }
-          : null,
-      message: "Faktura przyjęta; pobrano dane końcowe sesji"
+        : null,
+      message: ksefNumber
+        ? "Faktura przyjęta; pobrano numer KSeF"
+        : "Faktura jeszcze przetwarzana, brak numeru KSeF"
     });
   } catch (e) {
     console.error("POST /finalize-session error:", e);
