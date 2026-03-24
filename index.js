@@ -752,18 +752,20 @@ app.post("/send-invoice", async (req, res) => {
       method: "POST",
       body: rawBody
     });
+const invoiceReferenceNumber = extractInvoiceReferenceNumberFromSendResponse(result.body);
 
-    return res.status(result.status).json({
-      baseUrl: KSEF_BASE_URL,
-      endpoint,
-      xmlCharLength: xmlText.length,
-      xmlByteLength: encrypted.xmlBuffer.length,
-      requestPayload: payload,
-      rawRequestBody: rawBody,
-      rawRequestBodyLength: Buffer.byteLength(rawBody, "utf8"),
-      ksefStatus: result.status,
-      ksefResponse: result.body
-    });
+return res.status(result.status).json({
+  baseUrl: KSEF_BASE_URL,
+  endpoint,
+  xmlCharLength: xmlText.length,
+  xmlByteLength: encrypted.xmlBuffer.length,
+  requestPayload: payload,
+  rawRequestBody: rawBody,
+  rawRequestBodyLength: Buffer.byteLength(rawBody, "utf8"),
+  ksefStatus: result.status,
+  invoiceReferenceNumber,
+  ksefResponse: result.body
+});
   } catch (e) {
     console.error("POST /send-invoice error:", e);
     return res.status(500).json({ error: e.message });
@@ -792,16 +794,20 @@ app.post("/send-invoice-raw", async (req, res) => {
       method: "POST",
       body: rawBody
     });
+const invoiceReferenceNumber = extractInvoiceReferenceNumberFromSendResponse(result.body);
 
-    return res.status(result.status).json({
-      baseUrl: KSEF_BASE_URL,
-      endpoint,
-      requestPayload: payload,
-      rawRequestBody: rawBody,
-      rawRequestBodyLength: Buffer.byteLength(rawBody, "utf8"),
-      ksefStatus: result.status,
-      ksefResponse: result.body
-    });
+return res.status(result.status).json({
+  baseUrl: KSEF_BASE_URL,
+  endpoint,
+  xmlCharLength: xmlText.length,
+  xmlByteLength: encrypted.xmlBuffer.length,
+  requestPayload: payload,
+  rawRequestBody: rawBody,
+  rawRequestBodyLength: Buffer.byteLength(rawBody, "utf8"),
+  ksefStatus: result.status,
+  invoiceReferenceNumber,
+  ksefResponse: result.body
+});
   } catch (e) {
     console.error("POST /send-invoice-raw error:", e);
     return res.status(500).json({ error: e.message });
