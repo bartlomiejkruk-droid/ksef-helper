@@ -258,7 +258,8 @@ function looksLikeInvoiceObject(obj) {
     "invoiceStatus",
     "acquisitionTimestamp",
     "dateAcquired",
-    "dateAdded"
+    "dateAdded",
+    "ordinalNumber"
   ];
 
   return possibleKeys.some(key => Object.prototype.hasOwnProperty.call(obj, key));
@@ -349,9 +350,16 @@ function extractInvoiceStatus(invoiceObj) {
     return "";
   }
 
+  const statusObj = invoiceObj.status;
+
+  if (typeof statusObj === "string") {
+    return statusObj;
+  }
+
   return (
+    statusObj?.code ||
+    statusObj?.description ||
     invoiceObj.invoiceStatus ||
-    invoiceObj.status ||
     invoiceObj?.invoice?.status ||
     ""
   );
@@ -400,6 +408,78 @@ function buildXmlFileName(referenceNumber) {
 function buildPdfFileName(referenceNumber) {
   const safe = String(referenceNumber || "UPO").replace(/[^a-zA-Z0-9._-]/g, "_");
   return `${safe}.pdf`;
+}
+
+function extractFailedInvoices(anyBody) {
+  const source = anyBody?.ksefResponse || anyBody?.response || anyBody || {};
+
+  if (Array.isArray(source?.invoices)) {
+    return source.invoices;
+  }
+  if (Array.isArray(source?.items)) {
+    return source.items;
+  }
+  if (Array.isArray(source?.data)) {
+    return source.data;
+  }
+  if (Array.isArray(source)) {
+    return source;
+  }
+
+  const deepArrays = collectArraysDeep(source, []);
+  for (const arr of deepArrays) {
+    const hasFailedLikeObjects = arr.some(item => item && typeof item === "object" && (item.status || item.referenceNumber || item.invoiceNumber));
+    if (hasFailedLikeObjects) {
+      return arr;
+    }
+  }
+
+  return [];
+}
+
+function extractFailedStatusObject(failedInvoiceObj) {
+  if (!failedInvoiceObj || typeof failedInvoiceObj !== "object") {
+    return {};
+  }
+
+  return failedInvoiceObj.status || failedInvoiceObj?.invoice?.status || {};
+}
+
+function extractDuplicateInfoFromFailedResponse(failedBody) {
+  const failedInvoices = extractFailedInvoices(failedBody);
+
+  for (const failedInvoice of failedInvoices) {
+    const statusObj = extractFailedStatusObject(failedInvoice);
+    const statusCode = String(statusObj?.code || "");
+    const statusDescription = statusObj?.description || "";
+    const details = statusObj?.details || {};
+
+    if (statusCode === "440") {
+      return {
+        isDuplicate: true,
+        duplicateStatusCode: statusCode,
+        duplicateStatusDescription: statusDescription,
+        originalKsefNumber: details?.originalKsefNumber || "",
+        originalSessionReferenceNumber: details?.originalSessionReferenceNumber || "",
+        originalInvoiceNumber: details?.originalInvoiceNumber || "",
+        originalReferenceNumber: details?.originalReferenceNumber || "",
+        duplicateRawDetails: details,
+        duplicateFailedInvoice: failedInvoice
+      };
+    }
+  }
+
+  return {
+    isDuplicate: false,
+    duplicateStatusCode: "",
+    duplicateStatusDescription: "",
+    originalKsefNumber: "",
+    originalSessionReferenceNumber: "",
+    originalInvoiceNumber: "",
+    originalReferenceNumber: "",
+    duplicateRawDetails: null,
+    duplicateFailedInvoice: null
+  };
 }
 
 async function getSessionStatus(accessToken, sessionReferenceNumber) {
@@ -686,11 +766,20 @@ app.post("/session-failed", async (req, res) => {
     const sessionReferenceNumber = requireString(body, "sessionReferenceNumber");
 
     const result = await getSessionFailed(accessToken, sessionReferenceNumber);
+    const duplicateInfo = extractDuplicateInfoFromFailedResponse(result.body);
 
     return res.status(result.status).json({
       baseUrl: KSEF_BASE_URL,
       endpoint: result.endpoint,
       ksefStatus: result.status,
+      isDuplicate: duplicateInfo.isDuplicate,
+      duplicateStatusCode: duplicateInfo.duplicateStatusCode,
+      duplicateStatusDescription: duplicateInfo.duplicateStatusDescription,
+      originalKsefNumber: duplicateInfo.originalKsefNumber,
+      originalSessionReferenceNumber: duplicateInfo.originalSessionReferenceNumber,
+      originalInvoiceNumber: duplicateInfo.originalInvoiceNumber,
+      originalReferenceNumber: duplicateInfo.originalReferenceNumber,
+      duplicateFailedInvoice: duplicateInfo.duplicateFailedInvoice,
       ksefResponse: result.body
     });
   } catch (e) {
@@ -797,6 +886,7 @@ app.post("/session-debug", async (req, res) => {
 
     const successfulInvoices = extractInvoiceList(successfulResult.body);
     const selectedInvoice = pickBestInvoice(successfulInvoices);
+    const duplicateInfo = extractDuplicateInfoFromFailedResponse(failedResult.body);
 
     return res.json({
       baseUrl: KSEF_BASE_URL,
@@ -809,6 +899,14 @@ app.post("/session-debug", async (req, res) => {
       failed: {
         endpoint: failedEndpoint,
         httpStatus: failedResult.status,
+        isDuplicate: duplicateInfo.isDuplicate,
+        duplicateStatusCode: duplicateInfo.duplicateStatusCode,
+        duplicateStatusDescription: duplicateInfo.duplicateStatusDescription,
+        originalKsefNumber: duplicateInfo.originalKsefNumber,
+        originalSessionReferenceNumber: duplicateInfo.originalSessionReferenceNumber,
+        originalInvoiceNumber: duplicateInfo.originalInvoiceNumber,
+        originalReferenceNumber: duplicateInfo.originalReferenceNumber,
+        duplicateFailedInvoice: duplicateInfo.duplicateFailedInvoice,
         response: failedResult.body
       },
       successful: {
@@ -862,16 +960,85 @@ app.post("/finalize-session", async (req, res) => {
 
     if (summary.failedInvoiceCount > 0) {
       const failedResult = await getSessionFailed(accessToken, sessionReferenceNumber);
+      const duplicateInfo = extractDuplicateInfoFromFailedResponse(failedResult.body);
 
       let closeResult = null;
       if (closeAfter) {
         closeResult = await closeSession(accessToken, sessionReferenceNumber);
       }
 
+      if (duplicateInfo.isDuplicate && duplicateInfo.originalKsefNumber) {
+        let upoResult = null;
+        let upoReady = false;
+
+        if (duplicateInfo.originalReferenceNumber) {
+          try {
+            upoResult = await getInvoiceUpo(
+              accessToken,
+              duplicateInfo.originalSessionReferenceNumber || sessionReferenceNumber,
+              duplicateInfo.originalReferenceNumber,
+              preferUpo
+            );
+
+            if (upoResult && upoResult.status >= 200 && upoResult.status < 300) {
+              upoReady = true;
+            }
+          } catch (upoErr) {
+            console.error("UPO duplicate fetch error:", upoErr);
+          }
+        }
+
+        return res.status(200).json({
+          ok: true,
+          processed: true,
+          accepted: true,
+          isDuplicate: true,
+          sessionReferenceNumber,
+          sessionStatusCode: summary.statusCode,
+          sessionStatusDescription: summary.statusDescription,
+          invoiceCount: summary.invoiceCount,
+          successfulInvoiceCount: summary.successfulInvoiceCount,
+          failedInvoiceCount: summary.failedInvoiceCount,
+          duplicateStatusCode: duplicateInfo.duplicateStatusCode,
+          duplicateStatusDescription: duplicateInfo.duplicateStatusDescription,
+          referenceNumber: duplicateInfo.originalReferenceNumber || "",
+          ksefNumber: duplicateInfo.originalKsefNumber,
+          originalKsefNumber: duplicateInfo.originalKsefNumber,
+          originalSessionReferenceNumber: duplicateInfo.originalSessionReferenceNumber,
+          originalInvoiceNumber: duplicateInfo.originalInvoiceNumber,
+          duplicateFailedInvoice: duplicateInfo.duplicateFailedInvoice,
+          failedEndpoint: failedResult.endpoint,
+          failedResponse: failedResult.body,
+          upoReady,
+          upo: upoResult
+            ? {
+                endpoint: upoResult.endpoint,
+                httpStatus: upoResult.status,
+                contentType: upoResult.contentType,
+                upoMimeType: upoResult.upoMimeType,
+                upoFileName: upoResult.upoFileName,
+                upoText: upoResult.upoText,
+                upoBase64: upoResult.upoBase64,
+                response: upoResult.body
+              }
+            : null,
+          closeAttempted: closeAfter,
+          closeResponse: closeResult
+            ? {
+                endpoint: closeResult.endpoint,
+                httpStatus: closeResult.status,
+                response: closeResult.body
+              }
+            : null,
+          message: "Faktura już wcześniej istnieje w KSeF (duplikat)"
+        });
+      }
+
       return res.status(200).json({
         ok: false,
         processed: true,
         accepted: false,
+        isDuplicate: false,
         sessionReferenceNumber,
         sessionStatusCode: summary.statusCode,
         sessionStatusDescription: summary.statusDescription,
@@ -998,6 +1165,7 @@ app.post("/finalize-session", async (req, res) => {
       ok: true,
       processed: true,
       accepted: true,
+      isDuplicate: false,
       sessionReferenceNumber,
       sessionStatusCode: summary.statusCode,
       sessionStatusDescription: summary.statusDescription,
@@ -1033,7 +1201,7 @@ app.post("/finalize-session", async (req, res) => {
             httpStatus: closeResult.status,
             response: closeResult.body
           }
-        : null,
+          : null,
       message: "Faktura przyjęta; pobrano dane końcowe sesji"
     });
   } catch (e) {
