@@ -9,6 +9,20 @@ app.use(express.text({ type: ["text/*", "application/*"], limit: "20mb" }));
 const KSEF_BASE_URL = process.env.KSEF_BASE_URL || "https://api-demo.ksef.mf.gov.pl";
 const PORT = process.env.PORT || 3000;
 
+/**
+ * UWAGA:
+ * Te 3 ścieżki mogą wymagać dopasowania 1:1 do Twojej wersji OpenAPI KSeF.
+ * Zostawiłem je w jednym miejscu, żebyś nie szukał po całym kodzie.
+ */
+const SUCCESSFUL_INVOICES_PATH = (sessionReferenceNumber) =>
+  `${KSEF_BASE_URL}/v2/sessions/${sessionReferenceNumber}/invoices/successful`;
+
+const UPO_PATH = (sessionReferenceNumber, referenceNumber) =>
+  `${KSEF_BASE_URL}/v2/sessions/${sessionReferenceNumber}/invoices/${referenceNumber}/upo`;
+
+const CLOSE_SESSION_PATH = (sessionReferenceNumber) =>
+  `${KSEF_BASE_URL}/v2/sessions/online/${sessionReferenceNumber}/close`;
+
 function safeParseBody(req) {
   if (req.body && typeof req.body === "object" && !Buffer.isBuffer(req.body)) {
     return req.body;
@@ -32,12 +46,30 @@ function requireString(obj, key) {
   return obj[key];
 }
 
+function optionalString(obj, key, defaultValue = "") {
+  const value = obj[key];
+  return typeof value === "string" ? value : defaultValue;
+}
+
+function optionalBoolean(obj, key, defaultValue = false) {
+  return typeof obj[key] === "boolean" ? obj[key] : defaultValue;
+}
+
+function optionalNumber(obj, key, defaultValue = 0) {
+  const value = Number(obj[key]);
+  return Number.isFinite(value) ? value : defaultValue;
+}
+
 function requirePositiveNumber(obj, key) {
   const value = Number(obj[key]);
   if (!Number.isFinite(value) || value <= 0) {
     throw new Error(`Brak lub błędne pole liczbowe: ${key}`);
   }
   return value;
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 function toPemCertificate(base64Cert) {
@@ -106,8 +138,6 @@ function encryptXml(xmlText, aesKeyBase64, initializationVector) {
     cipher.final()
   ]);
 
-  // KLUCZOWA ZMIANA:
-  // NIE dokładamy IV do encryptedInvoiceContent
   const encryptedBuffer = cipherText;
 
   return {
@@ -121,31 +151,193 @@ function encryptXml(xmlText, aesKeyBase64, initializationVector) {
   };
 }
 
+async function readResponseBody(resp) {
+  const contentType = (resp.headers.get("content-type") || "").toLowerCase();
+  const text = await resp.text();
+
+  let parsed = null;
+  if (contentType.includes("application/json")) {
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      parsed = null;
+    }
+  }
+
+  return {
+    contentType,
+    text,
+    json: parsed
+  };
+}
+
 async function callKsef(url, accessToken, options = {}) {
+  const method = options.method || "GET";
+  const accept = options.accept || "application/json";
+  const contentType = options.contentType || (options.body ? "application/json" : undefined);
+
+  const headers = {
+    Authorization: `Bearer ${accessToken}`,
+    Accept: accept,
+    ...(contentType ? { "Content-Type": contentType } : {}),
+    ...(options.headers || {})
+  };
+
   const resp = await fetch(url, {
-    method: options.method || "GET",
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      Accept: "application/json",
-      ...(options.body ? { "Content-Type": "application/json" } : {})
-    },
+    method,
+    headers,
     ...(options.body ? { body: options.body } : {})
   });
 
-  const text = await resp.text();
-
-  let parsed;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    parsed = { raw: text };
-  }
+  const bodyRead = await readResponseBody(resp);
 
   return {
     status: resp.status,
     ok: resp.ok,
-    body: parsed,
-    raw: text
+    headers: Object.fromEntries(resp.headers.entries()),
+    contentType: bodyRead.contentType,
+    body: bodyRead.json ?? { raw: bodyRead.text },
+    raw: bodyRead.text
+  };
+}
+
+function extractSessionSummary(sessionBody) {
+  const source = sessionBody?.ksefResponse || sessionBody?.response || sessionBody || {};
+
+  return {
+    statusCode: source?.status?.code ?? null,
+    statusDescription: source?.status?.description ?? "",
+    invoiceCount: Number(source?.invoiceCount ?? 0),
+    successfulInvoiceCount: Number(source?.successfulInvoiceCount ?? 0),
+    failedInvoiceCount: Number(source?.failedInvoiceCount ?? 0),
+    dateCreated: source?.dateCreated ?? "",
+    dateUpdated: source?.dateUpdated ?? "",
+    validUntil: source?.validUntil ?? ""
+  };
+}
+
+function extractInvoiceList(anyBody) {
+  const source =
+    anyBody?.ksefResponse ||
+    anyBody?.response ||
+    anyBody ||
+    {};
+
+  if (Array.isArray(source?.invoices)) {
+    return source.invoices;
+  }
+
+  if (Array.isArray(source)) {
+    return source;
+  }
+
+  return [];
+}
+
+function extractFirstSuccessfulInvoice(successBody) {
+  const invoices = extractInvoiceList(successBody);
+  return invoices.length > 0 ? invoices[0] : null;
+}
+
+function extractKsefNumber(invoiceObj) {
+  if (!invoiceObj || typeof invoiceObj !== "object") {
+    return "";
+  }
+
+  return (
+    invoiceObj.ksefNumber ||
+    invoiceObj.ksefReferenceNumber ||
+    invoiceObj.ksefReferenceNo ||
+    invoiceObj.invoiceKsefNumber ||
+    ""
+  );
+}
+
+function buildXmlFileName(referenceNumber) {
+  const safe = String(referenceNumber || "UPO").replace(/[^a-zA-Z0-9._-]/g, "_");
+  return `${safe}.xml`;
+}
+
+function buildPdfFileName(referenceNumber) {
+  const safe = String(referenceNumber || "UPO").replace(/[^a-zA-Z0-9._-]/g, "_");
+  return `${safe}.pdf`;
+}
+
+async function getSessionStatus(accessToken, sessionReferenceNumber) {
+  const endpoint = `${KSEF_BASE_URL}/v2/sessions/${sessionReferenceNumber}`;
+  const result = await callKsef(endpoint, accessToken);
+
+  return {
+    endpoint,
+    ...result
+  };
+}
+
+async function getSessionFailed(accessToken, sessionReferenceNumber) {
+  const endpoint = `${KSEF_BASE_URL}/v2/sessions/${sessionReferenceNumber}/invoices/failed`;
+  const result = await callKsef(endpoint, accessToken);
+
+  return {
+    endpoint,
+    ...result
+  };
+}
+
+async function getSessionSuccessful(accessToken, sessionReferenceNumber) {
+  const endpoint = SUCCESSFUL_INVOICES_PATH(sessionReferenceNumber);
+  const result = await callKsef(endpoint, accessToken);
+
+  return {
+    endpoint,
+    ...result
+  };
+}
+
+async function closeSession(accessToken, sessionReferenceNumber) {
+  const endpoint = CLOSE_SESSION_PATH(sessionReferenceNumber);
+  const result = await callKsef(endpoint, accessToken, {
+    method: "POST",
+    body: JSON.stringify({})
+  });
+
+  return {
+    endpoint,
+    ...result
+  };
+}
+
+async function getInvoiceUpo(accessToken, sessionReferenceNumber, referenceNumber, prefer = "xml") {
+  const endpoint = UPO_PATH(sessionReferenceNumber, referenceNumber);
+
+  let accept = "application/xml";
+  if (prefer === "pdf") {
+    accept = "application/pdf";
+  } else if (prefer === "json") {
+    accept = "application/json";
+  }
+
+  const result = await callKsef(endpoint, accessToken, {
+    method: "GET",
+    accept
+  });
+
+  const isPdf = result.contentType.includes("application/pdf");
+  const isXml =
+    result.contentType.includes("application/xml") ||
+    result.contentType.includes("text/xml") ||
+    (!result.contentType.includes("application/json") && result.raw?.trim()?.startsWith("<"));
+
+  return {
+    endpoint,
+    ...result,
+    upoMimeType: isPdf
+      ? "application/pdf"
+      : isXml
+        ? "application/xml"
+        : result.contentType || "application/octet-stream",
+    upoFileName: isPdf ? buildPdfFileName(`UPO_${referenceNumber}`) : buildXmlFileName(`UPO_${referenceNumber}`),
+    upoText: isPdf ? "" : result.raw,
+    upoBase64: Buffer.from(result.raw || "", isPdf ? "binary" : "utf8").toString("base64")
   };
 }
 
@@ -288,85 +480,6 @@ app.post("/send-invoice", async (req, res) => {
   }
 });
 
-app.post("/session-status", async (req, res) => {
-  try {
-    const body = safeParseBody(req);
-
-    const accessToken = requireString(body, "accessToken");
-    const sessionReferenceNumber = requireString(body, "sessionReferenceNumber");
-
-    const endpoint = `${KSEF_BASE_URL}/v2/sessions/${sessionReferenceNumber}`;
-    const result = await callKsef(endpoint, accessToken);
-
-    return res.status(result.status).json({
-      baseUrl: KSEF_BASE_URL,
-      endpoint,
-      ksefStatus: result.status,
-      ksefResponse: result.body
-    });
-  } catch (e) {
-    console.error("POST /session-status error:", e);
-    return res.status(500).json({ error: e.message });
-  }
-});
-
-app.post("/session-failed", async (req, res) => {
-  try {
-    const body = safeParseBody(req);
-
-    const accessToken = requireString(body, "accessToken");
-    const sessionReferenceNumber = requireString(body, "sessionReferenceNumber");
-
-    const endpoint = `${KSEF_BASE_URL}/v2/sessions/${sessionReferenceNumber}/invoices/failed`;
-    const result = await callKsef(endpoint, accessToken);
-
-    return res.status(result.status).json({
-      baseUrl: KSEF_BASE_URL,
-      endpoint,
-      ksefStatus: result.status,
-      ksefResponse: result.body
-    });
-  } catch (e) {
-    console.error("POST /session-failed error:", e);
-    return res.status(500).json({ error: e.message });
-  }
-});
-
-app.post("/session-debug", async (req, res) => {
-  try {
-    const body = safeParseBody(req);
-
-    const accessToken = requireString(body, "accessToken");
-    const sessionReferenceNumber = requireString(body, "sessionReferenceNumber");
-
-    const statusEndpoint = `${KSEF_BASE_URL}/v2/sessions/${sessionReferenceNumber}`;
-    const failedEndpoint = `${KSEF_BASE_URL}/v2/sessions/${sessionReferenceNumber}/invoices/failed`;
-
-    const [statusResult, failedResult] = await Promise.all([
-      callKsef(statusEndpoint, accessToken),
-      callKsef(failedEndpoint, accessToken)
-    ]);
-
-    return res.json({
-      baseUrl: KSEF_BASE_URL,
-      sessionReferenceNumber,
-      status: {
-        endpoint: statusEndpoint,
-        httpStatus: statusResult.status,
-        response: statusResult.body
-      },
-      failed: {
-        endpoint: failedEndpoint,
-        httpStatus: failedResult.status,
-        response: failedResult.body
-      }
-    });
-  } catch (e) {
-    console.error("POST /session-debug error:", e);
-    return res.status(500).json({ error: e.message });
-  }
-});
-
 app.post("/send-invoice-raw", async (req, res) => {
   try {
     const body = safeParseBody(req);
@@ -401,6 +514,316 @@ app.post("/send-invoice-raw", async (req, res) => {
     });
   } catch (e) {
     console.error("POST /send-invoice-raw error:", e);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/session-status", async (req, res) => {
+  try {
+    const body = safeParseBody(req);
+
+    const accessToken = requireString(body, "accessToken");
+    const sessionReferenceNumber = requireString(body, "sessionReferenceNumber");
+
+    const result = await getSessionStatus(accessToken, sessionReferenceNumber);
+
+    return res.status(result.status).json({
+      baseUrl: KSEF_BASE_URL,
+      endpoint: result.endpoint,
+      ksefStatus: result.status,
+      ksefResponse: result.body
+    });
+  } catch (e) {
+    console.error("POST /session-status error:", e);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/session-failed", async (req, res) => {
+  try {
+    const body = safeParseBody(req);
+
+    const accessToken = requireString(body, "accessToken");
+    const sessionReferenceNumber = requireString(body, "sessionReferenceNumber");
+
+    const result = await getSessionFailed(accessToken, sessionReferenceNumber);
+
+    return res.status(result.status).json({
+      baseUrl: KSEF_BASE_URL,
+      endpoint: result.endpoint,
+      ksefStatus: result.status,
+      ksefResponse: result.body
+    });
+  } catch (e) {
+    console.error("POST /session-failed error:", e);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/session-successful", async (req, res) => {
+  try {
+    const body = safeParseBody(req);
+
+    const accessToken = requireString(body, "accessToken");
+    const sessionReferenceNumber = requireString(body, "sessionReferenceNumber");
+
+    const result = await getSessionSuccessful(accessToken, sessionReferenceNumber);
+
+    return res.status(result.status).json({
+      baseUrl: KSEF_BASE_URL,
+      endpoint: result.endpoint,
+      ksefStatus: result.status,
+      ksefResponse: result.body
+    });
+  } catch (e) {
+    console.error("POST /session-successful error:", e);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/invoice-upo", async (req, res) => {
+  try {
+    const body = safeParseBody(req);
+
+    const accessToken = requireString(body, "accessToken");
+    const sessionReferenceNumber = requireString(body, "sessionReferenceNumber");
+    const referenceNumber = requireString(body, "referenceNumber");
+    const prefer = optionalString(body, "prefer", "xml");
+
+    const result = await getInvoiceUpo(accessToken, sessionReferenceNumber, referenceNumber, prefer);
+
+    return res.status(result.status).json({
+      baseUrl: KSEF_BASE_URL,
+      endpoint: result.endpoint,
+      ksefStatus: result.status,
+      contentType: result.contentType,
+      upoMimeType: result.upoMimeType,
+      upoFileName: result.upoFileName,
+      upoText: result.upoText,
+      upoBase64: result.upoBase64,
+      ksefResponse: result.body
+    });
+  } catch (e) {
+    console.error("POST /invoice-upo error:", e);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/session-close", async (req, res) => {
+  try {
+    const body = safeParseBody(req);
+
+    const accessToken = requireString(body, "accessToken");
+    const sessionReferenceNumber = requireString(body, "sessionReferenceNumber");
+
+    const result = await closeSession(accessToken, sessionReferenceNumber);
+
+    return res.status(result.status).json({
+      baseUrl: KSEF_BASE_URL,
+      endpoint: result.endpoint,
+      ksefStatus: result.status,
+      ksefResponse: result.body
+    });
+  } catch (e) {
+    console.error("POST /session-close error:", e);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/session-debug", async (req, res) => {
+  try {
+    const body = safeParseBody(req);
+
+    const accessToken = requireString(body, "accessToken");
+    const sessionReferenceNumber = requireString(body, "sessionReferenceNumber");
+
+    const statusEndpoint = `${KSEF_BASE_URL}/v2/sessions/${sessionReferenceNumber}`;
+    const failedEndpoint = `${KSEF_BASE_URL}/v2/sessions/${sessionReferenceNumber}/invoices/failed`;
+    const successfulEndpoint = SUCCESSFUL_INVOICES_PATH(sessionReferenceNumber);
+
+    const [statusResult, failedResult, successfulResult] = await Promise.all([
+      callKsef(statusEndpoint, accessToken),
+      callKsef(failedEndpoint, accessToken),
+      callKsef(successfulEndpoint, accessToken)
+    ]);
+
+    return res.json({
+      baseUrl: KSEF_BASE_URL,
+      sessionReferenceNumber,
+      status: {
+        endpoint: statusEndpoint,
+        httpStatus: statusResult.status,
+        response: statusResult.body
+      },
+      failed: {
+        endpoint: failedEndpoint,
+        httpStatus: failedResult.status,
+        response: failedResult.body
+      },
+      successful: {
+        endpoint: successfulEndpoint,
+        httpStatus: successfulResult.status,
+        response: successfulResult.body
+      }
+    });
+  } catch (e) {
+    console.error("POST /session-debug error:", e);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/finalize-session", async (req, res) => {
+  try {
+    const body = safeParseBody(req);
+
+    const accessToken = requireString(body, "accessToken");
+    const sessionReferenceNumber = requireString(body, "sessionReferenceNumber");
+    const closeAfter = optionalBoolean(body, "closeAfter", true);
+    const pollCount = optionalNumber(body, "pollCount", 10);
+    const pollDelayMs = optionalNumber(body, "pollDelayMs", 1500);
+    const preferUpo = optionalString(body, "preferUpo", "xml");
+
+    let statusResult = null;
+    let summary = null;
+    let i = 0;
+
+    for (i = 0; i < pollCount; i++) {
+      statusResult = await getSessionStatus(accessToken, sessionReferenceNumber);
+      summary = extractSessionSummary(statusResult.body);
+
+      if (summary.failedInvoiceCount > 0 || summary.successfulInvoiceCount > 0) {
+        break;
+      }
+
+      if (i < pollCount - 1) {
+        await sleep(pollDelayMs);
+      }
+    }
+
+    if (!statusResult) {
+      throw new Error("Nie udało się pobrać statusu sesji");
+    }
+
+    if (summary.failedInvoiceCount > 0) {
+      const failedResult = await getSessionFailed(accessToken, sessionReferenceNumber);
+
+      let closeResult = null;
+      if (closeAfter) {
+        closeResult = await closeSession(accessToken, sessionReferenceNumber);
+      }
+
+      return res.status(200).json({
+        ok: false,
+        processed: true,
+        accepted: false,
+        sessionReferenceNumber,
+        sessionStatusCode: summary.statusCode,
+        sessionStatusDescription: summary.statusDescription,
+        invoiceCount: summary.invoiceCount,
+        successfulInvoiceCount: summary.successfulInvoiceCount,
+        failedInvoiceCount: summary.failedInvoiceCount,
+        failedEndpoint: failedResult.endpoint,
+        failedResponse: failedResult.body,
+        closeAttempted: closeAfter,
+        closeResponse: closeResult
+          ? {
+              endpoint: closeResult.endpoint,
+              httpStatus: closeResult.status,
+              response: closeResult.body
+            }
+          : null,
+        message: "Sesja zawiera błędne faktury"
+      });
+    }
+
+    if (summary.successfulInvoiceCount < 1) {
+      return res.status(200).json({
+        ok: true,
+        processed: false,
+        accepted: false,
+        sessionReferenceNumber,
+        sessionStatusCode: summary.statusCode,
+        sessionStatusDescription: summary.statusDescription,
+        invoiceCount: summary.invoiceCount,
+        successfulInvoiceCount: summary.successfulInvoiceCount,
+        failedInvoiceCount: summary.failedInvoiceCount,
+        pollsPerformed: i + 1,
+        message: "Faktura jeszcze nie jest przetworzona końcowo"
+      });
+    }
+
+    const successfulResult = await getSessionSuccessful(accessToken, sessionReferenceNumber);
+    const firstInvoice = extractFirstSuccessfulInvoice(successfulResult.body);
+
+    if (!firstInvoice) {
+      return res.status(200).json({
+        ok: false,
+        processed: true,
+        accepted: false,
+        sessionReferenceNumber,
+        sessionStatusCode: summary.statusCode,
+        sessionStatusDescription: summary.statusDescription,
+        successfulEndpoint: successfulResult.endpoint,
+        successfulResponse: successfulResult.body,
+        message: "Brak danych pierwszej poprawnej faktury w sesji"
+      });
+    }
+
+    const referenceNumber = firstInvoice.referenceNumber || firstInvoice.referenceNo || "";
+    const ksefNumber = extractKsefNumber(firstInvoice);
+
+    let upoResult = null;
+    if (referenceNumber) {
+      upoResult = await getInvoiceUpo(
+        accessToken,
+        sessionReferenceNumber,
+        referenceNumber,
+        preferUpo
+      );
+    }
+
+    let closeResult = null;
+    if (closeAfter) {
+      closeResult = await closeSession(accessToken, sessionReferenceNumber);
+    }
+
+    return res.status(200).json({
+      ok: true,
+      processed: true,
+      accepted: true,
+      sessionReferenceNumber,
+      sessionStatusCode: summary.statusCode,
+      sessionStatusDescription: summary.statusDescription,
+      invoiceCount: summary.invoiceCount,
+      successfulInvoiceCount: summary.successfulInvoiceCount,
+      failedInvoiceCount: summary.failedInvoiceCount,
+      referenceNumber,
+      ksefNumber,
+      successfulInvoice: firstInvoice,
+      upo: upoResult
+        ? {
+            endpoint: upoResult.endpoint,
+            httpStatus: upoResult.status,
+            contentType: upoResult.contentType,
+            upoMimeType: upoResult.upoMimeType,
+            upoFileName: upoResult.upoFileName,
+            upoText: upoResult.upoText,
+            upoBase64: upoResult.upoBase64,
+            response: upoResult.body
+          }
+        : null,
+      closeAttempted: closeAfter,
+      closeResponse: closeResult
+        ? {
+            endpoint: closeResult.endpoint,
+            httpStatus: closeResult.status,
+            response: closeResult.body
+          }
+        : null,
+      message: "Faktura przyjęta; pobrano dane końcowe sesji"
+    });
+  } catch (e) {
+    console.error("POST /finalize-session error:", e);
     return res.status(500).json({ error: e.message });
   }
 });
