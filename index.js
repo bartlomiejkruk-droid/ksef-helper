@@ -17,7 +17,7 @@ function safeParseBody(req) {
   if (typeof req.body === "string") {
     try {
       return JSON.parse(req.body);
-    } catch (e) {
+    } catch {
       throw new Error("Body nie jest poprawnym JSON-em");
     }
   }
@@ -30,6 +30,14 @@ function requireString(obj, key) {
     throw new Error(`Brak lub błędne pole: ${key}`);
   }
   return obj[key];
+}
+
+function requirePositiveNumber(obj, key) {
+  const value = Number(obj[key]);
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error(`Brak lub błędne pole liczbowe: ${key}`);
+  }
+  return value;
 }
 
 function toPemCertificate(base64Cert) {
@@ -98,17 +106,17 @@ function encryptXml(xmlText, aesKeyBase64, initializationVector) {
     cipher.final()
   ]);
 
-  // Zostawiamy IV na początku, tak jak miałeś wcześniej
+  // Na razie zostawiamy IV na początku zaszyfrowanej treści
   const encryptedBuffer = Buffer.concat([iv, cipherText]);
 
   return {
     xmlBuffer,
     encryptedBuffer,
-    fileHash: sha256Base64(xmlBuffer),
-    fileSize: xmlBuffer.length,
-    encryptedDocumentHash: sha256Base64(encryptedBuffer),
-    encryptedDocumentSize: encryptedBuffer.length,
-    encryptedDocumentContent: encryptedBuffer.toString("base64")
+    invoiceHash: sha256Base64(xmlBuffer),
+    invoiceSize: xmlBuffer.length,
+    encryptedInvoiceHash: sha256Base64(encryptedBuffer),
+    encryptedInvoiceSize: encryptedBuffer.length,
+    encryptedInvoiceContent: encryptedBuffer.toString("base64")
   };
 }
 
@@ -183,11 +191,11 @@ app.post("/encrypt-document", async (req, res) => {
     const encrypted = encryptXml(xmlText, aesKeyBase64, initializationVector);
 
     return res.json({
-      fileHash: encrypted.fileHash,
-      fileSize: encrypted.fileSize,
-      encryptedDocumentHash: encrypted.encryptedDocumentHash,
-      encryptedDocumentSize: encrypted.encryptedDocumentSize,
-      encryptedDocumentContent: encrypted.encryptedDocumentContent
+      invoiceHash: encrypted.invoiceHash,
+      invoiceSize: encrypted.invoiceSize,
+      encryptedInvoiceHash: encrypted.encryptedInvoiceHash,
+      encryptedInvoiceSize: encrypted.encryptedInvoiceSize,
+      encryptedInvoiceContent: encrypted.encryptedInvoiceContent
     });
   } catch (e) {
     console.error("POST /encrypt-document error:", e);
@@ -208,11 +216,11 @@ app.post("/send-invoice", async (req, res) => {
     const encrypted = encryptXml(xmlText, aesKeyBase64, initializationVector);
 
     const payload = {
-      fileHash: encrypted.fileHash,
-      fileSize: encrypted.fileSize,
-      encryptedDocumentHash: encrypted.encryptedDocumentHash,
-      encryptedDocumentSize: encrypted.encryptedDocumentSize,
-      encryptedDocumentContent: encrypted.encryptedDocumentContent
+      invoiceHash: encrypted.invoiceHash,
+      invoiceSize: encrypted.invoiceSize,
+      encryptedInvoiceHash: encrypted.encryptedInvoiceHash,
+      encryptedInvoiceSize: encrypted.encryptedInvoiceSize,
+      encryptedInvoiceContent: encrypted.encryptedInvoiceContent
     };
 
     const rawBody = JSON.stringify(payload);
@@ -222,10 +230,10 @@ app.post("/send-invoice", async (req, res) => {
     console.log("endpoint:", endpoint);
     console.log("xmlCharLength:", xmlText.length);
     console.log("xmlByteLength:", encrypted.xmlBuffer.length);
-    console.log("fileHash:", payload.fileHash);
-    console.log("fileSize:", payload.fileSize);
-    console.log("encryptedDocumentHash:", payload.encryptedDocumentHash);
-    console.log("encryptedDocumentSize:", payload.encryptedDocumentSize);
+    console.log("invoiceHash:", payload.invoiceHash);
+    console.log("invoiceSize:", payload.invoiceSize);
+    console.log("encryptedInvoiceHash:", payload.encryptedInvoiceHash);
+    console.log("encryptedInvoiceSize:", payload.encryptedInvoiceSize);
     console.log("rawRequestBodyLength:", Buffer.byteLength(rawBody, "utf8"));
     console.log("rawRequestBody:", rawBody);
 
@@ -271,27 +279,13 @@ app.post("/send-invoice-raw", async (req, res) => {
 
     const accessToken = requireString(body, "accessToken");
     const sessionReferenceNumber = requireString(body, "sessionReferenceNumber");
-    const fileHash = requireString(body, "fileHash");
-    const encryptedDocumentHash = requireString(body, "encryptedDocumentHash");
-    const encryptedDocumentContent = requireString(body, "encryptedDocumentContent");
-
-    const fileSize = Number(body.fileSize);
-    const encryptedDocumentSize = Number(body.encryptedDocumentSize);
-
-    if (!Number.isFinite(fileSize) || fileSize <= 0) {
-      throw new Error("fileSize musi być dodatnią liczbą");
-    }
-
-    if (!Number.isFinite(encryptedDocumentSize) || encryptedDocumentSize <= 0) {
-      throw new Error("encryptedDocumentSize musi być dodatnią liczbą");
-    }
 
     const payload = {
-      fileHash,
-      fileSize,
-      encryptedDocumentHash,
-      encryptedDocumentSize,
-      encryptedDocumentContent
+      invoiceHash: requireString(body, "invoiceHash"),
+      invoiceSize: requirePositiveNumber(body, "invoiceSize"),
+      encryptedInvoiceHash: requireString(body, "encryptedInvoiceHash"),
+      encryptedInvoiceSize: requirePositiveNumber(body, "encryptedInvoiceSize"),
+      encryptedInvoiceContent: requireString(body, "encryptedInvoiceContent")
     };
 
     const rawBody = JSON.stringify(payload);
