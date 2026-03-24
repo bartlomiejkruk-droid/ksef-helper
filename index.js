@@ -4,6 +4,8 @@ import crypto from "crypto";
 const app = express();
 app.use(express.json({ limit: "15mb" }));
 
+const KSEF_BASE_URL = "https://api-demo.ksef.mf.gov.pl";
+
 function toPemCertificate(base64Cert) {
   const lines = base64Cert.match(/.{1,64}/g)?.join("\n") || base64Cert;
   return `-----BEGIN CERTIFICATE-----
@@ -12,7 +14,7 @@ ${lines}
 }
 
 async function getKsefPublicKeyByUsage(requiredUsage) {
-  const resp = await fetch("https://api-test.ksef.mf.gov.pl/v2/security/public-key-certificates", {
+  const resp = await fetch(`${KSEF_BASE_URL}/v2/security/public-key-certificates`, {
     method: "GET",
     headers: { "Accept": "application/json" }
   });
@@ -49,7 +51,11 @@ function sha256Base64(buffer) {
 }
 
 app.get("/", (req, res) => {
-  res.json({ ok: true, message: "ksef-helper works" });
+  res.json({
+    ok: true,
+    message: "ksef-helper works",
+    baseUrl: KSEF_BASE_URL
+  });
 });
 
 app.post("/encrypt-token", async (req, res) => {
@@ -189,7 +195,6 @@ app.post("/send-invoice", async (req, res) => {
     ]);
 
     const encryptedBuffer = Buffer.concat([iv, cipherText]);
-
     const plainHash = sha256Base64(invoiceBuffer);
 
     const payload = {
@@ -204,24 +209,26 @@ app.post("/send-invoice", async (req, res) => {
 
     const rawBody = JSON.stringify(payload);
 
-console.log("=== FINAL CHECK ===");
-console.log("fileHash:", payload.fileHash);
-console.log("rawBody contains fileHash:", rawBody.includes("fileHash"));
-console.log("rawBody:", rawBody);
-console.log("rawBody length:", Buffer.byteLength(rawBody, "utf8"));
+    console.log("=== FINAL CHECK ===");
+    console.log("baseUrl:", KSEF_BASE_URL);
+    console.log("fileHash:", payload.fileHash);
+    console.log("invoiceHash:", payload.invoiceHash);
+    console.log("rawBody contains fileHash:", rawBody.includes("fileHash"));
+    console.log("rawBody:", rawBody);
+    console.log("rawBody length:", Buffer.byteLength(rawBody, "utf8"));
 
-const ksefResp = await fetch(
-  `https://api-test.ksef.mf.gov.pl/v2/sessions/online/${sessionReferenceNumber}/invoices`,
-  {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${accessToken}`,
-      "Content-Type": "application/json; charset=utf-8", // 🔴 DODAJ TO
-      "Accept": "application/json"
-    },
-    body: rawBody
-  }
-);
+    const ksefResp = await fetch(
+      `${KSEF_BASE_URL}/v2/sessions/online/${sessionReferenceNumber}/invoices`,
+      {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${accessToken}`,
+          "Content-Type": "application/json; charset=utf-8",
+          "Accept": "application/json"
+        },
+        body: rawBody
+      }
+    );
 
     const text = await ksefResp.text();
     let parsed;
@@ -232,6 +239,7 @@ const ksefResp = await fetch(
     }
 
     return res.status(ksefResp.status).json({
+      baseUrl: KSEF_BASE_URL,
       xmlCharLength: xmlText.length,
       xmlByteLength: invoiceBuffer.length,
       requestPayload: payload,
