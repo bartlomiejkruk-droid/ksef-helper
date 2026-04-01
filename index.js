@@ -6,7 +6,7 @@ const app = express();
 app.use(express.json({ limit: "20mb" }));
 app.use(express.text({ type: ["text/*", "application/*"], limit: "20mb" }));
 
-const KSEF_BASE_URL = process.env.KSEF_BASE_URL || "https://api-demo.ksef.mf.gov.pl";
+const KSEF_BASE_URL = process.env.KSEF_BASE_URL || "https://api.ksef.mf.gov.pl";
 const PORT = process.env.PORT || 3000;
 
 /**
