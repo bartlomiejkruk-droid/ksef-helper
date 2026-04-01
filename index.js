@@ -454,17 +454,18 @@ function extractDuplicateInfoFromFailedResponse(failedBody) {
     const statusObj = extractFailedStatusObject(failedInvoice);
     const statusCode = String(statusObj?.code || "");
     const statusDescription = statusObj?.description || "";
-    const details = statusObj?.details || {};
+    const details = statusObj?.details || [];
+    const extensions = statusObj?.extensions || {};
 
     if (statusCode === "440") {
       return {
         isDuplicate: true,
         duplicateStatusCode: statusCode,
         duplicateStatusDescription: statusDescription,
-        originalKsefNumber: details?.originalKsefNumber || "",
-        originalSessionReferenceNumber: details?.originalSessionReferenceNumber || "",
-        originalInvoiceNumber: details?.originalInvoiceNumber || "",
-        originalReferenceNumber: details?.originalReferenceNumber || "",
+        originalKsefNumber: extensions?.originalKsefNumber || "",
+        originalSessionReferenceNumber: extensions?.originalSessionReferenceNumber || "",
+        originalInvoiceNumber: extensions?.originalInvoiceNumber || "",
+        originalReferenceNumber: extensions?.originalReferenceNumber || "",
         duplicateRawDetails: details,
         duplicateFailedInvoice: failedInvoice
       };
