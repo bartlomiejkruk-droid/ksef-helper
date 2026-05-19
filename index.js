@@ -1147,7 +1147,7 @@ const skipSet = new Set(skipKsefNumbers.map(x => String(x)));
     let hasMore = false;
 
     for (let i = 0; i < maxPages; i++) {
-  const pageOffset = pageOffsetStart + i;
+  const pageOffset = pageOffsetStart + (i * pageSize);
       const metadataPayload = {
         subjectType: "Subject2",
         dateRange: {
