@@ -1139,7 +1139,7 @@ app.post("/sync-incoming-invoices-xml", async (req, res) => {
     const metadataPayload = {
       subjectType: "Subject2",
       dateRange: {
-        dateType: "Acquisition",
+        dateType: "Invoicing",
         from: dateFrom,
         to: dateTo
       }
