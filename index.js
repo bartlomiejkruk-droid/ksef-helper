@@ -203,7 +203,19 @@ async function callKsef(url, accessToken, options = {}) {
     ...(options.body ? { body: options.body } : {})
   });
 
-  function extractIncomingMetadataInvoices(anyBody) {
+  const bodyRead = await readResponseBody(resp);
+
+  return {
+    status: resp.status,
+    ok: resp.ok,
+    headers: Object.fromEntries(resp.headers.entries()),
+    contentType: bodyRead.contentType,
+    body: bodyRead.json ?? { raw: bodyRead.text },
+    raw: bodyRead.text
+  };
+}
+
+function extractIncomingMetadataInvoices(anyBody) {
   const source = anyBody?.ksefResponse || anyBody?.response || anyBody || {};
 
   if (Array.isArray(source?.invoices)) return source.invoices;
@@ -249,18 +261,6 @@ function extractIncomingAmount(inv, key) {
     inv?.amount?.[key.replace("Amount", "")] ||
     0
   );
-}
-
-  const bodyRead = await readResponseBody(resp);
-
-  return {
-    status: resp.status,
-    ok: resp.ok,
-    headers: Object.fromEntries(resp.headers.entries()),
-    contentType: bodyRead.contentType,
-    body: bodyRead.json ?? { raw: bodyRead.text },
-    raw: bodyRead.text
-  };
 }
 
 function extractSessionSummary(sessionBody) {
