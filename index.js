@@ -1136,25 +1136,83 @@ app.post("/sync-incoming-invoices-xml", async (req, res) => {
 
     const metadataEndpoint = INVOICE_METADATA_QUERY_PATH();
 
-    const metadataPayload = {
-      subjectType: "Subject2",
-      dateRange: {
-        dateType: "Invoicing",
-        from: dateFrom,
-        to: dateTo
+    const pageSize = optionalNumber(body, "pageSize", 10);
+    const maxPages = optionalNumber(body, "maxPages", 10);
+
+    let allMetadataInvoices = [];
+    let metadataResponses = [];
+    let hasMore = false;
+
+    for (let pageOffset = 0; pageOffset < maxPages; pageOffset++) {
+      const metadataPayload = {
+        subjectType: "Subject2",
+        dateRange: {
+          dateType: "Invoicing",
+          from: dateFrom,
+          to: dateTo
+        },
+        pagination: {
+          pageOffset: pageOffset,
+          pageSize: pageSize
+        }
+      };
+
+      const metadataResult = await callKsef(metadataEndpoint, accessToken, {
+        method: "POST",
+        body: JSON.stringify(metadataPayload)
+      });
+
+      metadataResponses.push({
+        pageOffset,
+        status: metadataResult.status,
+        ok: metadataResult.ok,
+        response: metadataResult.body
+      });
+
+      if (!metadataResult.ok) {
+        return res.status(200).json({
+          ok: false,
+          baseUrl: KSEF_BASE_URL,
+          metadataEndpoint,
+          metadataHttpStatus: metadataResult.status,
+          metadataPayload,
+          metadataResponses,
+          error: metadataResult.body
+        });
       }
-    };
 
-    const metadataResult = await callKsef(metadataEndpoint, accessToken, {
-      method: "POST",
-      body: JSON.stringify(metadataPayload)
-    });
+      const pageInvoices = extractIncomingMetadataInvoices(metadataResult.body);
+      allMetadataInvoices = allMetadataInvoices.concat(pageInvoices);
 
-    const metadataInvoices = extractIncomingMetadataInvoices(metadataResult.body);
+      hasMore = Boolean(metadataResult.body?.hasMore);
+
+      if (!hasMore || pageInvoices.length === 0) {
+        break;
+      }
+    }
+
+    const seen = new Set();
+    const uniqueMetadataInvoices = [];
+
+    for (const inv of allMetadataInvoices) {
+      const ksefNumber = extractIncomingKsefNumber(inv);
+
+      if (!ksefNumber) {
+        uniqueMetadataInvoices.push(inv);
+        continue;
+      }
+
+      if (seen.has(ksefNumber)) {
+        continue;
+      }
+
+      seen.add(ksefNumber);
+      uniqueMetadataInvoices.push(inv);
+    }
 
     const results = [];
 
-    for (const inv of metadataInvoices) {
+    for (const inv of uniqueMetadataInvoices) {
       const ksefNumber = extractIncomingKsefNumber(inv);
 
       if (!ksefNumber) {
@@ -1191,15 +1249,16 @@ app.post("/sync-incoming-invoices-xml", async (req, res) => {
     }
 
     return res.status(200).json({
-      ok: metadataResult.ok,
+      ok: true,
       baseUrl: KSEF_BASE_URL,
       metadataEndpoint,
-      metadataHttpStatus: metadataResult.status,
-      metadataPayload,
-      metadataCountParsed: metadataInvoices.length,
+      pageSize,
+      maxPages,
+      metadataCountParsed: uniqueMetadataInvoices.length,
       downloadedCount: results.filter(x => x.ok).length,
+      hasMoreAfterMaxPages: hasMore,
       invoices: results,
-      metadataResponse: metadataResult.body
+      metadataResponses
     });
 
   } catch (e) {
