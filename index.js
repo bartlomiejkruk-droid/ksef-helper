@@ -1155,10 +1155,6 @@ const skipSet = new Set(skipKsefNumbers.map(x => String(x)));
           from: dateFrom,
           to: dateTo
         },
-        pagination: {
-          pageOffset: pageOffset,
-          pageSize: pageSize
-        }
       };
 
       const metadataResult = await callKsef(metadataEndpoint, accessToken, {
