@@ -1136,14 +1136,18 @@ app.post("/sync-incoming-invoices-xml", async (req, res) => {
 
     const metadataEndpoint = INVOICE_METADATA_QUERY_PATH();
 
-    const pageSize = optionalNumber(body, "pageSize", 10);
-    const maxPages = optionalNumber(body, "maxPages", 1);
+    const pageOffsetStart = optionalNumber(body, "pageOffset", 0);
+const pageSize = optionalNumber(body, "pageSize", 10);
+const maxPages = optionalNumber(body, "maxPages", 1);
+const skipKsefNumbers = Array.isArray(body.skipKsefNumbers) ? body.skipKsefNumbers : [];
+const skipSet = new Set(skipKsefNumbers.map(x => String(x)));
 
     let allMetadataInvoices = [];
     let metadataResponses = [];
     let hasMore = false;
 
-    for (let pageOffset = 0; pageOffset < maxPages; pageOffset++) {
+    for (let i = 0; i < maxPages; i++) {
+  const pageOffset = pageOffsetStart + i;
       const metadataPayload = {
         subjectType: "Subject2",
         dateRange: {
@@ -1214,6 +1218,19 @@ app.post("/sync-incoming-invoices-xml", async (req, res) => {
 
     for (const inv of uniqueMetadataInvoices) {
       const ksefNumber = extractIncomingKsefNumber(inv);
+      if (skipSet.has(String(ksefNumber))) {
+  results.push({
+    ok: false,
+    skipped: true,
+    reason: "Już istnieje w Zoho",
+    ksefNumber,
+    invoiceNumber: extractInvoiceNumber(inv),
+    sellerNip: extractIncomingSellerNip(inv),
+    sellerName: extractIncomingSellerName(inv),
+    metadata: inv
+  });
+  continue;
+}
 
       if (!ksefNumber) {
         results.push({
@@ -1249,12 +1266,13 @@ app.post("/sync-incoming-invoices-xml", async (req, res) => {
     }
 
     return res.status(200).json({
-      ok: true,
-      baseUrl: KSEF_BASE_URL,
-      metadataEndpoint,
-      pageSize,
-      maxPages,
-      metadataCountParsed: uniqueMetadataInvoices.length,
+  ok: true,
+  baseUrl: KSEF_BASE_URL,
+  metadataEndpoint,
+  pageOffsetStart,
+  pageSize,
+  maxPages,
+  metadataCountParsed: uniqueMetadataInvoices.length,
       downloadedCount: results.filter(x => x.ok).length,
       hasMoreAfterMaxPages: hasMore,
       invoices: results,
