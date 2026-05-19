@@ -1147,23 +1147,24 @@ const skipSet = new Set(skipKsefNumbers.map(x => String(x)));
     let hasMore = false;
 
     for (let i = 0; i < maxPages; i++) {
-  const pageOffset = pageOffsetStart + (i * pageSize);
-      const metadataPayload = {
-        subjectType: "Subject2",
-        dateRange: {
-          dateType: "Invoicing",
-          from: dateFrom,
-          to: dateTo
-        },
-      };
+  const pageOffset = pageOffsetStart + i;
 
-      const metadataEndpoint =
-  `${metadataEndpointBase}?pageOffset=${pageOffset}&pageSize=${pageSize}&sortOrder=Asc`;
+  const metadataEndpoint =
+    `${metadataEndpointBase}?pageOffset=${pageOffset}&pageSize=${pageSize}&sortOrder=Asc`;
 
-const metadataResult = await callKsef(metadataEndpoint, accessToken, {
-  method: "POST",
-  body: JSON.stringify(metadataPayload)
-});
+  const metadataPayload = {
+    subjectType: "Subject2",
+    dateRange: {
+      dateType: "Invoicing",
+      from: dateFrom,
+      to: dateTo
+    }
+  };
+
+  const metadataResult = await callKsef(metadataEndpoint, accessToken, {
+    method: "POST",
+    body: JSON.stringify(metadataPayload)
+  });
 
       metadataResponses.push({
         pageOffset,
@@ -1176,7 +1177,7 @@ const metadataResult = await callKsef(metadataEndpoint, accessToken, {
         return res.status(200).json({
           ok: false,
           baseUrl: KSEF_BASE_URL,
-          metadataEndpoint,
+         metadataEndpoint: metadataEndpointBase,
           metadataHttpStatus: metadataResult.status,
           metadataPayload,
           metadataResponses,
