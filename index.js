@@ -33,6 +33,12 @@ const UPO_BY_KSEF_PATH = (sessionReferenceNumber, ksefNumber) =>
 const CLOSE_SESSION_PATH = (sessionReferenceNumber) =>
   `${KSEF_BASE_URL}/v2/sessions/online/${encodeURIComponent(sessionReferenceNumber)}/close`;
 
+const INVOICE_METADATA_QUERY_PATH = () =>
+  `${KSEF_BASE_URL}/v2/invoices/query/metadata`;
+
+const INVOICE_XML_BY_KSEF_PATH = (ksefNumber) =>
+  `${KSEF_BASE_URL}/v2/invoices/ksef/${encodeURIComponent(ksefNumber)}`;
+
 function safeParseBody(req) {
   if (req.body && typeof req.body === "object" && !Buffer.isBuffer(req.body)) {
     return req.body;
@@ -196,6 +202,54 @@ async function callKsef(url, accessToken, options = {}) {
     headers,
     ...(options.body ? { body: options.body } : {})
   });
+
+  function extractIncomingMetadataInvoices(anyBody) {
+  const source = anyBody?.ksefResponse || anyBody?.response || anyBody || {};
+
+  if (Array.isArray(source?.invoices)) return source.invoices;
+  if (Array.isArray(source?.items)) return source.items;
+  if (Array.isArray(source?.data)) return source.data;
+  if (Array.isArray(source)) return source;
+
+  return [];
+}
+
+function extractIncomingKsefNumber(inv) {
+  return (
+    inv?.ksefNumber ||
+    inv?.invoiceKsefNumber ||
+    inv?.ksefReferenceNumber ||
+    inv?.ksef?.number ||
+    ""
+  );
+}
+
+function extractIncomingSellerNip(inv) {
+  return (
+    inv?.seller?.nip ||
+    inv?.sellerNip ||
+    inv?.subject1?.nip ||
+    inv?.subject1?.identifier?.value ||
+    ""
+  );
+}
+
+function extractIncomingSellerName(inv) {
+  return (
+    inv?.seller?.name ||
+    inv?.sellerName ||
+    inv?.subject1?.name ||
+    ""
+  );
+}
+
+function extractIncomingAmount(inv, key) {
+  return (
+    inv?.[key] ||
+    inv?.amount?.[key.replace("Amount", "")] ||
+    0
+  );
+}
 
   const bodyRead = await readResponseBody(resp);
 
@@ -1072,7 +1126,91 @@ app.post("/finalize-session", async (req, res) => {
     return res.status(500).json({ error: e.message });
   }
 });
+app.post("/sync-incoming-invoices-xml", async (req, res) => {
+  try {
+    const body = safeParseBody(req);
 
+    const accessToken = requireString(body, "accessToken");
+    const dateFrom = requireString(body, "dateFrom");
+    const dateTo = requireString(body, "dateTo");
+
+    const metadataEndpoint = INVOICE_METADATA_QUERY_PATH();
+
+    const metadataPayload = {
+      subjectType: "Subject2",
+      dateRange: {
+        dateType: "AcquisitionDate",
+        from: dateFrom,
+        to: dateTo
+      }
+    };
+
+    const metadataResult = await callKsef(metadataEndpoint, accessToken, {
+      method: "POST",
+      body: JSON.stringify(metadataPayload)
+    });
+
+    const metadataInvoices = extractIncomingMetadataInvoices(metadataResult.body);
+
+    const results = [];
+
+    for (const inv of metadataInvoices) {
+      const ksefNumber = extractIncomingKsefNumber(inv);
+
+      if (!ksefNumber) {
+        results.push({
+          ok: false,
+          reason: "Brak numeru KSeF w metadanych",
+          metadata: inv
+        });
+        continue;
+      }
+
+      const xmlEndpoint = INVOICE_XML_BY_KSEF_PATH(ksefNumber);
+
+      const xmlResult = await callKsef(xmlEndpoint, accessToken, {
+        method: "GET",
+        accept: "application/xml"
+      });
+
+      results.push({
+        ok: xmlResult.ok,
+        ksefNumber,
+        invoiceNumber: extractInvoiceNumber(inv),
+        sellerNip: extractIncomingSellerNip(inv),
+        sellerName: extractIncomingSellerName(inv),
+        acquisitionTimestamp: extractAcquisitionTimestamp(inv),
+        invoicingDate: inv?.invoicingDate || inv?.issueDate || "",
+        netAmount: extractIncomingAmount(inv, "netAmount"),
+        vatAmount: extractIncomingAmount(inv, "vatAmount"),
+        grossAmount: extractIncomingAmount(inv, "grossAmount"),
+        xmlHttpStatus: xmlResult.status,
+        xmlText: xmlResult.raw,
+        metadata: inv
+      });
+    }
+
+    return res.status(200).json({
+      ok: metadataResult.ok,
+      baseUrl: KSEF_BASE_URL,
+      metadataEndpoint,
+      metadataHttpStatus: metadataResult.status,
+      metadataPayload,
+      metadataCountParsed: metadataInvoices.length,
+      downloadedCount: results.filter(x => x.ok).length,
+      invoices: results,
+      metadataResponse: metadataResult.body
+    });
+
+  } catch (e) {
+    console.error("POST /sync-incoming-invoices-xml error:", e);
+
+    return res.status(500).json({
+      ok: false,
+      error: e.message
+    });
+  }
+});
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Server running on port ${PORT}`);
   console.log(`KSEF_BASE_URL=${KSEF_BASE_URL}`);
