@@ -1137,7 +1137,7 @@ app.post("/sync-incoming-invoices-xml", async (req, res) => {
     const metadataEndpoint = INVOICE_METADATA_QUERY_PATH();
 
     const pageSize = optionalNumber(body, "pageSize", 10);
-    const maxPages = optionalNumber(body, "maxPages", 10);
+    const maxPages = optionalNumber(body, "maxPages", 1);
 
     let allMetadataInvoices = [];
     let metadataResponses = [];
