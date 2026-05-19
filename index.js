@@ -1134,7 +1134,7 @@ app.post("/sync-incoming-invoices-xml", async (req, res) => {
     const dateFrom = requireString(body, "dateFrom");
     const dateTo = requireString(body, "dateTo");
 
-    const metadataEndpoint = INVOICE_METADATA_QUERY_PATH();
+    const metadataEndpointBase = INVOICE_METADATA_QUERY_PATH();
 
     const pageOffsetStart = optionalNumber(body, "pageOffset", 0);
 const pageSize = optionalNumber(body, "pageSize", 10);
@@ -1157,10 +1157,13 @@ const skipSet = new Set(skipKsefNumbers.map(x => String(x)));
         },
       };
 
-      const metadataResult = await callKsef(metadataEndpoint, accessToken, {
-        method: "POST",
-        body: JSON.stringify(metadataPayload)
-      });
+      const metadataEndpoint =
+  `${metadataEndpointBase}?pageOffset=${pageOffset}&pageSize=${pageSize}&sortOrder=Asc`;
+
+const metadataResult = await callKsef(metadataEndpoint, accessToken, {
+  method: "POST",
+  body: JSON.stringify(metadataPayload)
+});
 
       metadataResponses.push({
         pageOffset,
