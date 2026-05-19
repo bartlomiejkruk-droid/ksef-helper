@@ -1268,7 +1268,7 @@ const skipSet = new Set(skipKsefNumbers.map(x => String(x)));
     return res.status(200).json({
   ok: true,
   baseUrl: KSEF_BASE_URL,
-  metadataEndpoint,
+  metadataEndpoint: metadataEndpointBase,
   pageOffsetStart,
   pageSize,
   maxPages,
