@@ -1371,7 +1371,7 @@ app.post("/ksef-visualize", async (req, res) => {
       `attachment; filename="${safeInvoiceNumber}.pdf"`
     );
 
-    return res.send(pdfBuffer);
+    return res.end(pdfBuffer);
 
   } catch (e) {
     if (browser) {
