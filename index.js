@@ -1,6 +1,8 @@
 import express from "express";
 import crypto from "crypto";
 
+import puppeteer from "puppeteer";
+
 const app = express();
 
 app.use(express.json({ limit: "20mb" }));
@@ -1288,6 +1290,107 @@ const skipSet = new Set(skipKsefNumbers.map(x => String(x)));
     });
   }
 });
+app.post("/ksef-visualize", async (req, res) => {
+  let browser = null;
+
+  try {
+    const body = safeParseBody(req);
+
+    const xml = requireString(body, "xml");
+    const invoiceNumber = optionalString(body, "invoiceNumber", "faktura-ksef");
+
+    const safeInvoiceNumber = invoiceNumber
+      .replace(/[^\w\-ąćęłńóśźżĄĆĘŁŃÓŚŹŻ]/g, "_")
+      .slice(0, 80);
+
+    const html = `
+      <!doctype html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <style>
+          body {
+            font-family: Arial, sans-serif;
+            padding: 32px;
+            color: #111;
+          }
+          h1 {
+            font-size: 22px;
+            margin-bottom: 8px;
+          }
+          .meta {
+            margin-bottom: 24px;
+            font-size: 13px;
+          }
+          pre {
+            white-space: pre-wrap;
+            word-break: break-word;
+            font-size: 10px;
+            background: #f5f5f5;
+            padding: 16px;
+            border-radius: 8px;
+            border: 1px solid #ddd;
+          }
+        </style>
+      </head>
+      <body>
+        <h1>Faktura KSeF / CEF</h1>
+        <div class="meta">Numer faktury: ${escapeHtml(safeInvoiceNumber)}</div>
+        <pre>${escapeHtml(xml)}</pre>
+      </body>
+      </html>
+    `;
+
+    browser = await puppeteer.launch({
+      headless: "new",
+      args: ["--no-sandbox", "--disable-setuid-sandbox"]
+    });
+
+    const page = await browser.newPage();
+
+    await page.setContent(html, {
+      waitUntil: "networkidle0"
+    });
+
+    const pdfBuffer = await page.pdf({
+      format: "A4",
+      printBackground: true,
+      margin: {
+        top: "15mm",
+        right: "12mm",
+        bottom: "15mm",
+        left: "12mm"
+      }
+    });
+
+    await browser.close();
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${safeInvoiceNumber}.pdf"`
+    );
+
+    return res.send(pdfBuffer);
+
+  } catch (e) {
+    if (browser) {
+      await browser.close().catch(() => {});
+    }
+
+    console.error("POST /ksef-visualize error:", e);
+    return res.status(500).send("PDF generation error: " + e.message);
+  }
+});
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Server running on port ${PORT}`);
   console.log(`KSEF_BASE_URL=${KSEF_BASE_URL}`);
