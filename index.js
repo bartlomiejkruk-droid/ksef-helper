@@ -1,9 +1,8 @@
-import express from "express";
-import crypto from "crypto";
-
-import puppeteer from "puppeteer";
-import PDFDocument from "pdfkit";
-import { XMLParser } from "fast-xml-parser";
+const express = require("express");
+const crypto = require("crypto");
+const puppeteer = require("puppeteer");
+const PDFDocument = require("pdfkit");
+const { XMLParser } = require("fast-xml-parser");
 
 const app = express();
 
