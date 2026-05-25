@@ -3,6 +3,9 @@ import crypto from "crypto";
 
 import puppeteer from "puppeteer";
 
+const PDFDocument = require("pdfkit");
+const { XMLParser } = require("fast-xml-parser");
+
 const app = express();
 
 app.use(express.json({ limit: "20mb" }));
@@ -1291,106 +1294,143 @@ const skipSet = new Set(skipKsefNumbers.map(x => String(x)));
   }
 });
 app.post("/ksef-visualize", async (req, res) => {
-  let browser = null;
-
   try {
-    const body = safeParseBody(req);
+    const xml = req.body.xml;
+    const invoiceNumber = req.body.invoiceNumber || "invoice";
 
-    const xml = requireString(body, "xml");
-    const invoiceNumber = optionalString(body, "invoiceNumber", "faktura-ksef");
+    if (!xml) {
+      return res.status(400).json({ error: "Missing XML" });
+    }
 
-    const safeInvoiceNumber = invoiceNumber
-      .replace(/[^\w\-ąćęłńóśźżĄĆĘŁŃÓŚŹŻ]/g, "_")
-      .slice(0, 80);
-
-    const html = `
-      <!doctype html>
-      <html>
-      <head>
-        <meta charset="utf-8">
-        <style>
-          body {
-            font-family: Arial, sans-serif;
-            padding: 32px;
-            color: #111;
-          }
-          h1 {
-            font-size: 22px;
-            margin-bottom: 8px;
-          }
-          .meta {
-            margin-bottom: 24px;
-            font-size: 13px;
-          }
-          pre {
-            white-space: pre-wrap;
-            word-break: break-word;
-            font-size: 10px;
-            background: #f5f5f5;
-            padding: 16px;
-            border-radius: 8px;
-            border: 1px solid #ddd;
-          }
-        </style>
-      </head>
-      <body>
-        <h1>Faktura KSeF / CEF</h1>
-        <div class="meta">Numer faktury: ${escapeHtml(safeInvoiceNumber)}</div>
-        <pre>${escapeHtml(xml)}</pre>
-      </body>
-      </html>
-    `;
-
-    browser = await puppeteer.launch({
-      headless: "new",
-      args: ["--no-sandbox", "--disable-setuid-sandbox"]
+    const parser = new XMLParser({
+      ignoreAttributes: false,
+      removeNSPrefix: true
     });
 
-    const page = await browser.newPage();
+    const parsed = parser.parse(xml);
+    const faktura = parsed.Faktura;
 
-    await page.setContent(html, {
-      waitUntil: "networkidle0"
-    });
+    const podmiot1 = faktura.Podmiot1 || {};
+    const podmiot2 = faktura.Podmiot2 || {};
+    const fa = faktura.Fa || {};
 
-    const pdfBuffer = await page.pdf({
-      format: "A4",
-      printBackground: true,
-      margin: {
-        top: "15mm",
-        right: "12mm",
-        bottom: "15mm",
-        left: "12mm"
-      }
-    });
+    const seller = podmiot1.DaneIdentyfikacyjne || {};
+    const sellerAddress = podmiot1.Adres || {};
 
-    await browser.close();
+    const buyer = podmiot2.DaneIdentyfikacyjne || {};
+    const buyerAddress = podmiot2.Adres || {};
+
+    const rows = Array.isArray(fa.FaWiersz)
+      ? fa.FaWiersz
+      : fa.FaWiersz
+      ? [fa.FaWiersz]
+      : [];
 
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader(
       "Content-Disposition",
-      `attachment; filename="${safeInvoiceNumber}.pdf"`
+      `inline; filename="faktura-${invoiceNumber}.pdf"`
     );
 
-    return res.end(pdfBuffer);
+    const doc = new PDFDocument({ size: "A4", margin: 40 });
+    doc.pipe(res);
 
-  } catch (e) {
-    if (browser) {
-      await browser.close().catch(() => {});
-    }
+    doc.fontSize(20).text("Faktura VAT", { align: "center" });
+    doc.moveDown();
 
-    console.error("POST /ksef-visualize error:", e);
-    return res.status(500).send("PDF generation error: " + e.message);
+    doc.fontSize(11);
+    doc.text(`Numer faktury: ${fa.P_2 || invoiceNumber}`);
+    doc.text(`Data wystawienia: ${fa.P_1 || ""}`);
+    doc.text(`Waluta: ${fa.KodWaluty || ""}`);
+    doc.moveDown();
+
+    doc.fontSize(13).text("Sprzedawca", { underline: true });
+    doc.fontSize(10);
+    doc.text(seller.Nazwa || "");
+    doc.text(`NIP: ${seller.NIP || ""}`);
+    doc.text(`${sellerAddress.AdresL1 || ""}`);
+    doc.text(`${sellerAddress.KodKraju || ""}`);
+    doc.moveDown();
+
+    doc.fontSize(13).text("Nabywca", { underline: true });
+    doc.fontSize(10);
+    doc.text(buyer.Nazwa || "");
+    doc.text(`NIP: ${buyer.NIP || ""}`);
+    doc.text(`${buyerAddress.AdresL1 || ""}`);
+    doc.text(`${buyerAddress.KodKraju || ""}`);
+    doc.moveDown();
+
+    doc.fontSize(13).text("Pozycje faktury", { underline: true });
+    doc.moveDown(0.5);
+
+    const startX = 40;
+    let y = doc.y;
+
+    doc.fontSize(9).font("Helvetica-Bold");
+    doc.text("Lp.", startX, y, { width: 30 });
+    doc.text("Nazwa", startX + 35, y, { width: 250 });
+    doc.text("Ilość", startX + 300, y, { width: 50, align: "right" });
+    doc.text("Cena", startX + 360, y, { width: 70, align: "right" });
+    doc.text("Wartość", startX + 440, y, { width: 70, align: "right" });
+
+    y += 18;
+    doc.moveTo(startX, y).lineTo(550, y).stroke();
+    y += 8;
+
+    doc.font("Helvetica").fontSize(9);
+
+    rows.forEach((row, index) => {
+      if (y > 720) {
+        doc.addPage();
+        y = 40;
+      }
+
+      const name = row.P_7 || "";
+      const qty = row.P_8B || "";
+      const price = row.P_9A || "";
+      const value = row.P_11 || "";
+
+      const rowHeight = Math.max(
+        28,
+        doc.heightOfString(name, { width: 250 }) + 8
+      );
+
+      doc.text(String(index + 1), startX, y, { width: 30 });
+      doc.text(name, startX + 35, y, { width: 250 });
+      doc.text(String(qty), startX + 300, y, { width: 50, align: "right" });
+      doc.text(String(price), startX + 360, y, { width: 70, align: "right" });
+      doc.text(String(value), startX + 440, y, { width: 70, align: "right" });
+
+      y += rowHeight;
+    });
+
+    doc.moveDown(2);
+    doc.font("Helvetica-Bold").fontSize(12);
+    doc.text(`Razem netto: ${fa.P_13_1 || ""} ${fa.KodWaluty || ""}`, {
+      align: "right"
+    });
+    doc.text(`VAT: ${fa.P_14_1 || ""} ${fa.KodWaluty || ""}`, {
+      align: "right"
+    });
+    doc.text(`Razem brutto: ${fa.P_15 || ""} ${fa.KodWaluty || ""}`, {
+      align: "right"
+    });
+
+    doc.moveDown();
+    doc.font("Helvetica").fontSize(8);
+    doc.text("Dokument wygenerowany na podstawie struktury FA(3) KSeF.", {
+      align: "center"
+    });
+
+    doc.end();
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({
+      error: "PDF generation failed",
+      details: err.message
+    });
   }
 });
-
-function escapeHtml(value) {
-  return String(value)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Server running on port ${PORT}`);
   console.log(`KSEF_BASE_URL=${KSEF_BASE_URL}`);
